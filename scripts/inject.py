@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy the Hands crate into a grok-build checkout and register it."""
+"""Copy the Palmbridge crate into a grok-build checkout and register it."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ LEGACY_MEMBER = '    "crates/codegen/hands",'
 
 def main() -> int:
     if len(sys.argv) != 3:
-        print("usage: inject.py <hands-repo> <grok-build-checkout>", file=sys.stderr)
+        print("usage: inject.py <palmbridge-repo> <grok-build-checkout>", file=sys.stderr)
         return 2
     src_repo = Path(sys.argv[1]).resolve()
     grok_build = Path(sys.argv[2]).resolve()

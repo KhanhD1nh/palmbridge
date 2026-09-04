@@ -19,7 +19,7 @@ const DEFAULT_WAIT_MS: u64 = 600;
 pub fn tool_definition() -> Value {
     json!({
         "name": "browser",
-        "description": "Inspect and debug a real Chromium page. Operations: start (persistent debug browser), inspect (DOM + computed styles, optionally sampled over time), eval (run JavaScript), screenshot, stop. If no debug browser is running, inspect/eval/screenshot launch an ephemeral headless browser. For authenticated localhost apps, run operation=start once and sign in to the persistent Hands browser profile.",
+        "description": "Inspect and debug a real Chromium page. Operations: start (persistent debug browser), inspect (DOM + computed styles, optionally sampled over time), eval (run JavaScript), screenshot, stop. If no debug browser is running, inspect/eval/screenshot launch an ephemeral headless browser. For authenticated localhost apps, run operation=start once and sign in to the persistent Palmbridge browser profile.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -73,7 +73,7 @@ pub async fn run(arguments: &Value, cwd: &Path) -> Result<String, String> {
 async fn start_persistent(arguments: &Value) -> Result<String, String> {
     let port = arg_u16(arguments, "port", DEFAULT_PORT);
     if cdp_ready(port).await {
-        return Ok(format!("Hands browser is already listening on http://127.0.0.1:{port}."));
+        return Ok(format!("Palmbridge browser is already listening on http://127.0.0.1:{port}."));
     }
     let browser = find_browser().ok_or_else(browser_not_found_message)?;
     let profile = arguments
@@ -94,7 +94,7 @@ async fn start_persistent(arguments: &Value) -> Result<String, String> {
 
     wait_for_cdp(port, Duration::from_secs(8)).await?;
     Ok(format!(
-        "Started Hands browser (pid {pid}) on debug port {port}.\nProfile: {}\nURL: {url}\nIf the app requires authentication, sign in once in this browser; later browser inspect/eval calls can reuse the session.",
+        "Started Palmbridge browser (pid {pid}) on debug port {port}.\nProfile: {}\nURL: {url}\nIf the app requires authentication, sign in once in this browser; later browser inspect/eval calls can reuse the session.",
         profile.display()
     ))
 }
@@ -123,9 +123,9 @@ fn stop_persistent() -> Result<String, String> {
         }
         let _ = fs::remove_file(pid_path);
         let _ = fs::remove_file(browser_port_path());
-        return Ok(format!("Stopped Hands browser process {pid}."));
+        return Ok(format!("Stopped Palmbridge browser process {pid}."));
     }
-    Ok("No Hands browser pid is recorded.".into())
+    Ok("No Palmbridge browser pid is recorded.".into())
 }
 
 async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> Result<String, String> {
@@ -142,7 +142,7 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
         let port = free_port()?;
         let browser = find_browser().ok_or_else(browser_not_found_message)?;
         let profile = std::env::temp_dir().join(format!(
-            "hands-browser-{}-{}",
+            "palmbridge-browser-{}-{}",
             std::process::id(),
             now_millis()
         ));
@@ -232,7 +232,7 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
                 .and_then(Value::as_str)
                 .map(PathBuf::from)
                 .map(|p| if p.is_absolute() { p } else { cwd.join(p) })
-                .unwrap_or_else(|| std::env::temp_dir().join(format!("hands-browser-{}.png", now_millis())));
+                .unwrap_or_else(|| std::env::temp_dir().join(format!("palmbridge-browser-{}.png", now_millis())));
             if let Some(parent) = output_path.parent() {
                 fs::create_dir_all(parent).map_err(|e| format!("create screenshot directory: {e}"))?;
             }
@@ -447,7 +447,7 @@ fn spawn_browser(
 }
 
 fn find_browser() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("HANDS_BROWSER_PATH") {
+    if let Ok(path) = std::env::var("PALMBRIDGE_BROWSER_PATH") {
         let p = PathBuf::from(path);
         if p.is_file() {
             return Some(p);
@@ -516,7 +516,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn browser_not_found_message() -> String {
-    "No Chromium browser found. Install Chrome/Brave/Edge/Chromium or set HANDS_BROWSER_PATH.".into()
+    "No Chromium browser found. Install Chrome/Brave/Edge/Chromium or set PALMBRIDGE_BROWSER_PATH.".into()
 }
 
 fn free_port() -> Result<u16, String> {

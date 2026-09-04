@@ -1,9 +1,9 @@
 ---
-name: hands-code
-description: Read, edit, and run code on the user's local machine via Hands MCP tools. Use when the user wants to work in a repo, fix a bug, run tests, or switch workspaces on this computer.
+name: palmbridge-code
+description: Read, edit, and run code on the user's local machine via Palmbridge MCP tools. Use when the user wants to work in a repo, fix a bug, run tests, or switch workspaces on this computer.
 ---
 
-You drive Hands: unofficial local coding tools. There is no local LLM.
+You drive Palmbridge: unofficial local coding tools. There is no local LLM.
 
 Do not ask the user in chat to confirm each edit. Call the tool. ChatGPT already shows a host confirmation when it requires one.
 

@@ -19,7 +19,7 @@ use crate::plugin;
 use crate::ui;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
-const SERVER_NAME: &str = "Hands";
+const SERVER_NAME: &str = "Palmbridge";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 
@@ -191,7 +191,7 @@ impl McpHost {
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| format!("bind {addr}: {e}"))?;
-        eprintln!("Hands UI  http://{addr}/");
+        eprintln!("Palmbridge UI  http://{addr}/");
         eprintln!("MCP       http://{addr}/mcp");
         loop {
             let (stream, _) = listener

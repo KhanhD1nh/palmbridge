@@ -10,9 +10,9 @@ Fork of [nghyane/hands](https://github.com/nghyane/hands). Not affiliated with O
 
 ## How it works
 
-1. `hands setup` pins the current directory as the active workspace, stores the tunnel credentials, writes a `tunnel-client` profile, and starts the local services.
-2. On macOS and Linux, `hands --http` starts an MCP server on `127.0.0.1:8787` and a private Unix socket for `tunnel-client`. Windows uses the installed tunnel-client profile and its detached tunnel process.
-3. `tunnel-client` authenticates to OpenAI using the restricted runtime key and binds the selected `tunnel_...` ID to that local MCP server.
+1. `palmbridge setup` pins the current directory as the active workspace, stores tunnel credentials, writes a `tunnel-client` profile, and starts local services.
+2. On macOS and Linux, `palmbridge --http` starts an MCP server on `127.0.0.1:8787` and a private Unix socket for `tunnel-client`. Windows uses the installed tunnel-client profile and its detached tunnel process.
+3. `tunnel-client` authenticates to OpenAI using the restricted runtime key and binds the selected `tunnel_...` ID to the local MCP server.
 4. ChatGPT's Tunnel connection sends MCP requests through that existing tunnel. Palmbridge executes the requested tool against the pinned workspace and returns the result through the same path.
 
 ```mermaid
@@ -36,13 +36,13 @@ sequenceDiagram
 
 | Component | Role | Where it listens or persists |
 |---|---|---|
-| `hands --http` | MCP HTTP server and local configuration UI | `127.0.0.1:8787` |
+| `palmbridge --http` | MCP HTTP server and local configuration UI | `127.0.0.1:8787` |
 | `tunnel-client` | Authenticated outbound connection to OpenAI | OpenAI control plane; health endpoint `127.0.0.1:18780` when running |
-| Workspace pin | Defines the default repository for tools | `~/.config/hands/workspace` on Unix; `%APPDATA%\hands\workspace` on Windows |
-| Tunnel profile | Maps `tunnel-client` to Palmbridge | `~/.config/tunnel-client/hands.yaml` |
+| Workspace pin | Defines the default repository for tools | `~/.config/palmbridge/workspace` on Unix; `%APPDATA%\palmbridge\workspace` on Windows |
+| Tunnel profile | Maps `tunnel-client` to Palmbridge | `~/.config/tunnel-client/palmbridge.yaml` |
 | Runtime key file | Read by `tunnel-client`, never sent through MCP | Palmbridge config directory, `0600` on Unix |
 
-`hands config --open` serves only on loopback. It is a local control page, not a public dashboard.
+`palmbridge config --open` serves only on loopback. It is a local control page, not a public dashboard.
 
 ### Workspace and access boundary
 
@@ -56,7 +56,7 @@ Use a separate OS account or a dedicated working directory when the machine cont
 - The `tunnel_...` ID identifies the tunnel; it is not a replacement for the runtime key.
 - MCP tool traffic uses the outbound tunnel. No inbound port-forwarding or public local listener is configured by Palmbridge.
 - On macOS, the key is also saved in Keychain when interactive setup succeeds. On Linux/Windows, Palmbridge uses `secret-tool` when available. Every platform retains a local key file because `tunnel-client` requires a file-backed profile.
-- `hands status --json` reports local process health; it does not prove ChatGPT authorization or a particular tool's permission.
+- `palmbridge status --json` reports local process health; it does not prove ChatGPT authorization or a particular tool's permission.
 
 ### Lifecycle by platform
 
@@ -64,13 +64,13 @@ Use a separate OS account or a dedicated working directory when the machine cont
 |---|---|---|
 | macOS | LaunchAgents start and keep services alive after login | AC power prevents idle sleep while tunnel waits; lid close on battery may suspend it |
 | Linux | systemd user services start and restart services | Host/user session policy controls sleep and login behavior |
-| Windows | Detached `tunnel-client` process started by `hands setup` or `hands start` | No persistent supervisor; run `hands start` after reboot or a crash |
+| Windows | Detached `tunnel-client` process started by `palmbridge setup` or `palmbridge start` | No persistent supervisor; run `palmbridge start` after reboot or a crash |
 
 ## Security model
 
 Palmbridge does not contain a model or independently decide actions. ChatGPT chooses tools; the MCP tool annotations tell ChatGPT which operations are read-only or destructive. ChatGPT may still require confirmation based on its own policy. Treat **Never ask** as granting the connected ChatGPT app broad authority to operate with the local user account.
 
-Audit before granting broad approval. Keep the tunnel key restricted. Stop the service with `hands stop` when remote access is not needed.
+Audit before granting broad approval. Keep the tunnel key restricted. Stop the service with `palmbridge stop` when remote access is not needed.
 
 ## Requirements
 
@@ -96,12 +96,12 @@ cd palmbridge
 ./install.sh
 ```
 
-Palmbridge installs `hands` to `~/.local/bin`. For zsh:
+Palmbridge installs `palmbridge` to `~/.local/bin`. For zsh:
 
 ```bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
-hands --version
+palmbridge --version
 ```
 
 ### Windows
@@ -121,11 +121,11 @@ cd palmbridge
 .\install.ps1
 ```
 
-Palmbridge installs `hands.exe` and `tunnel-client.exe` to `%USERPROFILE%\.local\bin`. Add it to the current PowerShell session, then verify:
+Palmbridge installs `palmbridge.exe` and `tunnel-client.exe` to `%USERPROFILE%\.local\bin`. Add it to the current PowerShell session, then verify:
 
 ```powershell
 $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
-hands --version
+palmbridge --version
 ```
 
 Persist it through Windows Environment Variables if required for new terminals.
@@ -159,12 +159,12 @@ Run from the repository ChatGPT may access:
 
 ```bash
 cd /path/to/repository
-hands setup
+palmbridge setup
 ```
 
 ```powershell
 cd C:\path\to\repository
-hands setup
+palmbridge setup
 ```
 
 The interactive setup requests the runtime key and tunnel ID, saves them locally, starts the tunnel, and copies the tunnel ID to the clipboard.
@@ -174,13 +174,13 @@ Non-interactive setup:
 ```bash
 export CONTROL_PLANE_API_KEY="sk-..."
 export CONTROL_PLANE_TUNNEL_ID="tunnel_..."
-hands setup
+palmbridge setup
 ```
 
 ```powershell
 $env:CONTROL_PLANE_API_KEY = "sk-..."
 $env:CONTROL_PLANE_TUNNEL_ID = "tunnel_..."
-hands setup
+palmbridge setup
 ```
 
 Credential storage: macOS uses Keychain. The tunnel-client profile references a local key file. Never commit either value.
@@ -193,7 +193,7 @@ Credential storage: macOS uses Keychain. The tunnel-client profile references a 
 4. Paste the `tunnel_...` ID.
 5. Scan tools.
 
-The connection is currently named **Hands** for upstream MCP compatibility.
+The connection is named **Palmbridge**.
 
 ## Use
 
@@ -201,28 +201,28 @@ Pin a workspace before asking ChatGPT to edit it:
 
 ```bash
 cd /path/to/repository
-hands use
+palmbridge use
 ```
 
 ```powershell
 cd C:\path\to\repository
-hands use
+palmbridge use
 ```
 
 `workspace_info` reports the active workspace. `set_workspace` can switch it from ChatGPT.
 
 | Command | Purpose |
 |---|---|
-| `hands setup` | Configure credentials, pin workspace, enable tunnel |
-| `hands use` | Pin current directory |
-| `hands start` / `hands stop` | Start or stop tunnel |
-| `hands enable` / `hands disable` | Enable or disable service |
-| `hands status --json` | Check machine-readable health |
-| `hands config --open` | Open local UI at `http://127.0.0.1:8787/` |
-| `hands list` | List MCP tools |
-| `hands call <tool> <json>` | Call a tool locally for debugging |
+| `palmbridge setup` | Configure credentials, pin workspace, enable tunnel |
+| `palmbridge use` | Pin current directory |
+| `palmbridge start` / `palmbridge stop` | Start or stop tunnel |
+| `palmbridge enable` / `palmbridge disable` | Enable or disable service |
+| `palmbridge status --json` | Check machine-readable health |
+| `palmbridge config --open` | Open local UI at `http://127.0.0.1:8787/` |
+| `palmbridge list` | List MCP tools |
+| `palmbridge call <tool> <json>` | Call a tool locally for debugging |
 
-macOS uses a LaunchAgent. Linux uses systemd user services. Windows starts a detached background process; after reboot or crash, run `hands start` again.
+macOS uses a LaunchAgent. Linux uses systemd user services. Windows starts a detached background process; after reboot or crash, run `palmbridge start` again.
 
 ## ChatGPT approvals
 
@@ -232,7 +232,7 @@ ChatGPT, not Palmbridge, decides approvals:
 - File edits are routine actions.
 - Shell commands and task termination may require approval.
 
-For unattended edits, select **Always allow** on the first write, or set **Settings → Apps → Hands → Never ask**. This setting persists across chats.
+For unattended edits, select **Always allow** on the first write, or set **Settings → Apps → Palmbridge → Never ask**. This setting persists across chats.
 
 ## Tools
 
@@ -252,18 +252,18 @@ LSP detects `.grok/lsp.json`, project `node_modules/.bin`, npm-global language s
 ## Troubleshooting
 
 ```bash
-hands status --json
-hands list
-hands call read_file '{"target_file":"README.md"}'
+palmbridge status --json
+palmbridge list
+palmbridge call read_file '{"target_file":"README.md"}'
 ```
 
 | Symptom | Fix |
 |---|---|
-| `hands: command not found` | Add `~/.local/bin` to `PATH`. On Windows add `%USERPROFILE%\.local\bin`. |
+| `palmbridge: command not found` | Add `~/.local/bin` to `PATH`. On Windows add `%USERPROFILE%\.local\bin`. |
 | `tunnel-client not found` | macOS: `brew install openai/tools/tunnel-client`; Windows: rerun `install.ps1`. |
-| Windows build fails before compiling Hands | Confirm VS C++ Build Tools and `protoc.exe` are installed and on `PATH`. |
-| Tunnel not running after Windows reboot | Run `hands start`. |
-| Tunnel appears offline | Run `hands status --json`; then `hands stop` and `hands start`. |
+| Windows build fails before compiling Palmbridge | Confirm VS C++ Build Tools and `protoc.exe` are installed and on `PATH`. |
+| Tunnel not running after Windows reboot | Run `palmbridge start`. |
+| Tunnel appears offline | Run `palmbridge status --json`; then `palmbridge stop` and `palmbridge start`. |
 
 ## License
 

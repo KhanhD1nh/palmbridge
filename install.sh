@@ -4,7 +4,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
-CACHE="${HANDS_CACHE:-${GROK_HARNESS_CACHE:-$HOME/.cache/hands}}"
+CACHE="${PALMBRIDGE_CACHE:-${HANDS_CACHE:-${GROK_HARNESS_CACHE:-$HOME/.cache/palmbridge}}}"
 GROK_BUILD_URL="${GROK_BUILD_URL:-https://github.com/xai-org/grok-build.git}"
 GROK_BUILD_REF="${GROK_BUILD_REF:-main}"
 JOBS="${JOBS:-}"
@@ -29,30 +29,30 @@ if ! command -v rustup >/dev/null 2>&1; then
 fi
 
 cd "$GROK_BUILD"
-CARGO_ARGS=(build --release -p hands)
+CARGO_ARGS=(build --release -p palmbridge)
 if [[ -n "$JOBS" ]]; then
   CARGO_ARGS+=(-j "$JOBS")
 fi
 cargo "${CARGO_ARGS[@]}"
 
-BIN="$GROK_BUILD/target/release/hands"
-install -m 0755 "$BIN" "$PREFIX/bin/hands"
+BIN="$GROK_BUILD/target/release/palmbridge"
+install -m 0755 "$BIN" "$PREFIX/bin/palmbridge"
 
 echo
-echo "installed $PREFIX/bin/hands"
-"$PREFIX/bin/hands" --version
+echo "installed $PREFIX/bin/palmbridge"
+"$PREFIX/bin/palmbridge" --version
 echo
 
 if [[ -n "${CONTROL_PLANE_API_KEY:-}" && -n "${CONTROL_PLANE_TUNNEL_ID:-}" ]]; then
-  "$PREFIX/bin/hands" setup || true
+  "$PREFIX/bin/palmbridge" setup || true
   echo "tunnel setup attempted (keys found in env)."
 else
   echo "Next:"
   echo "  brew install openai/tools/tunnel-client   # once"
-  echo "  cd /your/repo && hands setup              # TTY checklist, no browser"
+  echo "  cd /your/repo && palmbridge setup         # TTY checklist, no browser"
 fi
 echo
-if ! command -v hands >/dev/null 2>&1; then
+if ! command -v palmbridge >/dev/null 2>&1; then
   echo "Put $PREFIX/bin on PATH, e.g.:"
   echo "  export PATH=\"$PREFIX/bin:\$PATH\""
 fi

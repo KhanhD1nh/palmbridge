@@ -1,10 +1,10 @@
-# Hands — native Windows install (port of install.sh)
-# Builds hands.exe from xai-org/grok-build source, downloads tunnel-client.exe.
+# Palmbridge — native Windows install (port of install.sh)
+# Builds palmbridge.exe from xai-org/grok-build source, downloads tunnel-client.exe.
 # Requires: git, python3 (py), rustup (stable-msvc), VS Build Tools (C++).
 param(
     [string]$RepoRoot = (Split-Path -Parent $MyInvocation.MyCommand.Path),
     [string]$Prefix = "$env:USERPROFILE\.local",
-    [string]$Cache = "$env:USERPROFILE\.cache\hands"
+    [string]$Cache = "$env:USERPROFILE\.cache\palmbridge"
 )
 $ErrorActionPreference = "Stop"
 
@@ -39,13 +39,13 @@ if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
 
 Push-Location $GROK_BUILD
 try {
-    cargo build --release -p hands
+    cargo build --release -p palmbridge
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 } finally {
     Pop-Location
 }
 
-Copy-Item "$GROK_BUILD\target\release\hands.exe" "$Prefix\bin\hands.exe" -Force
+Copy-Item "$GROK_BUILD\target\release\palmbridge.exe" "$Prefix\bin\palmbridge.exe" -Force
 
 $TC_URL = "https://persistent.oaistatic.com/tunnel-client/v$TC_VERSION/tunnel-client-v$TC_VERSION-windows-amd64.zip"
 $tcZip = Join-Path $Cache "tunnel-client.zip"
@@ -54,7 +54,7 @@ Expand-Archive -Path $tcZip -DestinationPath (Join-Path $Cache "tunnel-client") 
 Copy-Item (Join-Path $Cache "tunnel-client\tunnel-client.exe") "$Prefix\bin\tunnel-client.exe" -Force
 Remove-Item $tcZip -Force
 
-& "$Prefix\bin\hands.exe" --version
+& "$Prefix\bin\palmbridge.exe" --version
 Write-Host ""
-Write-Host "installed $Prefix\bin\hands.exe"
-Write-Host "next: cd /your/repo && hands setup"
+Write-Host "installed $Prefix\bin\palmbridge.exe"
+Write-Host "next: cd /your/repo && palmbridge setup"

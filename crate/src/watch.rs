@@ -32,7 +32,7 @@ pub fn run() -> Result<(), String> {
             };
             if due {
                 notify(
-                    "Hands",
+                    "Palmbridge",
                     "Tunnel is down. ChatGPT cannot reach this Mac until it is back.",
                 );
                 notified_at = Some(Instant::now());
@@ -62,7 +62,7 @@ fn restart_tunnel() {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|| "501".into());
         let _ = Command::new("launchctl")
-            .args(["kickstart", "-k", &format!("gui/{uid}/dev.hands.tunnel")])
+            .args(["kickstart", "-k", &format!("gui/{uid}/dev.palmbridge.tunnel")])
             .status();
     }
 }

@@ -7,8 +7,8 @@ use std::process::{Command, Stdio};
 
 use crate::host;
 
-const SERVICE: &str = "dev.hands.runtime-key";
-const ACCOUNT: &str = "hands";
+const SERVICE: &str = "dev.palmbridge.runtime-key";
+const ACCOUNT: &str = "palmbridge";
 
 pub fn valid_runtime_key(key: &str) -> bool {
     key.starts_with("sk-") && key.len() >= 32 && !key.contains(char::is_whitespace)
@@ -31,7 +31,7 @@ pub fn get() -> Option<String> {
             return Some(k);
         }
     }
-    // Keychain can prompt; only from a TTY (hands setup), never LaunchAgent.
+    // Keychain can prompt; only from a TTY (palmbridge setup), never LaunchAgent.
     if std::io::stdin().is_terminal() {
         if let Some(k) = keychain_get() {
             if valid_runtime_key(&k) {
@@ -109,7 +109,7 @@ fn keychain_set(key: &str) -> Result<(), String> {
                 "-w",
                 key,
                 "-l",
-                "Hands ChatGPT runtime key",
+                "Palmbridge ChatGPT runtime key",
             ])
             .stdin(Stdio::null())
             .stderr(Stdio::piped())
@@ -146,7 +146,7 @@ fn secret_tool_set(key: &str) -> Result<(), String> {
         .args([
             "store",
             "--label",
-            "Hands ChatGPT runtime key",
+            "Palmbridge ChatGPT runtime key",
             "service",
             SERVICE,
             "account",

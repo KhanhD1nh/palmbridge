@@ -1,4 +1,4 @@
-//! Hands — unofficial ChatGPT plugin. Local coding tools. No model.
+//! Palmbridge — unofficial ChatGPT plugin. Local coding tools. No model.
 
 mod host;
 mod browser;
@@ -17,22 +17,22 @@ use std::path::PathBuf;
 use crate::host::{APP, DISPLAY};
 
 const USAGE: &str = "\
-Hands — unofficial ChatGPT plugin (local tools, no model)
+Palmbridge — unofficial ChatGPT plugin (local tools, no model)
 
-  hands setup                      first-run checklist (TTY). no browser
-  hands setup --ui                 same, then open config page
-  hands config                     serve UI at http://127.0.0.1:8787/ (no browser)
-  hands config --open              serve UI and open it
-  cd /repo && hands use            pin this folder
-  hands status [--json]
-  hands enable | disable | start | stop
-  hands                            MCP stdio (ChatGPT tunnel)
+  palmbridge setup                      first-run checklist (TTY). no browser
+  palmbridge setup --ui                 same, then open config page
+  palmbridge config                     serve UI at http://127.0.0.1:8787/ (no browser)
+  palmbridge config --open              serve UI and open it
+  cd /repo && palmbridge use            pin this folder
+  palmbridge status [--json]
+  palmbridge enable | disable | start | stop
+  palmbridge                            MCP stdio (ChatGPT tunnel)
 
 Debug:
-  hands list
-  hands call <tool> <json>
-  hands watch                      notify when tunnel drops (LaunchAgent)
-  hands --http [--port N]
+  palmbridge list
+  palmbridge call <tool> <json>
+  palmbridge watch                      notify when tunnel drops (LaunchAgent)
+  palmbridge --http [--port N]
 ";
 
 enum Cmd {
@@ -122,7 +122,7 @@ async fn main() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{e}");
-            std::process::exit(if e.starts_with(DISPLAY) || e.starts_with("Hands") {
+            std::process::exit(if e.starts_with(DISPLAY) || e.starts_with("Palmbridge") {
                 0
             } else {
                 2
@@ -166,7 +166,7 @@ async fn run(fallback: PathBuf, cmd: Cmd) -> Result<(), String> {
                     eprintln!("pinned. ChatGPT uses this folder on the next tool call.");
                 }
                 Ok(false) => {
-                    eprintln!("pinned. Run: hands setup");
+                    eprintln!("pinned. Run: palmbridge setup");
                 }
                 Err(e) => eprintln!("pinned, tunnel start failed: {e}"),
             }

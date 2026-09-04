@@ -19,14 +19,14 @@ use xai_grok_tools::notification::ToolNotificationHandle;
 use xai_grok_tools::registry::types::{SessionContext, ToolConfig, ToolServerConfig};
 use xai_grok_tools::reminders::DEFAULT_REMINDER_TAG;
 
-pub const APP: &str = "hands";
-pub const DISPLAY: &str = "Hands";
+pub const APP: &str = "palmbridge";
+pub const DISPLAY: &str = "Palmbridge";
 
 fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// XDG on Unix (`~/.config/hands`). `%APPDATA%\hands` on Windows.
+/// XDG on Unix (`~/.config/palmbridge`). `%APPDATA%\palmbridge` on Windows.
 pub fn config_dir() -> PathBuf {
     #[cfg(windows)]
     {
@@ -39,7 +39,7 @@ pub fn config_dir() -> PathBuf {
 
 pub fn tunnel_client_dir() -> PathBuf {
     // tunnel-client (OpenAI) always reads its profile from ~/.config/tunnel-client,
-    // including on Windows — NOT %APPDATA%. Match that so hands.yaml is found.
+    // including on Windows — NOT %APPDATA%. Match that so palmbridge.yaml is found.
     home_dir().join(".config/tunnel-client")
 }
 
@@ -51,22 +51,24 @@ pub fn mcp_socket() -> PathBuf {
     config_dir().join("mcp.sock")
 }
 
-/// Copy `~/.config/grok-harness` once if the new dir is empty.
+/// Copy legacy configuration once if the new directory is empty.
 pub fn migrate_from_legacy() {
     let dest = config_dir();
     if dest.join("workspace").is_file() || dest.join("control-plane.key").is_file() {
         return;
     }
-    let src = home_dir().join(".config/grok-harness");
-    if !src.is_dir() {
-        return;
-    }
-    let _ = std::fs::create_dir_all(&dest);
-    for name in ["workspace", "control-plane.key"] {
-        let from = src.join(name);
-        let to = dest.join(name);
-        if from.is_file() && !to.exists() {
-            let _ = std::fs::copy(&from, &to);
+    for legacy in ["hands", "grok-harness"] {
+        let src = home_dir().join(".config").join(legacy);
+        if !src.is_dir() {
+            continue;
+        }
+        let _ = std::fs::create_dir_all(&dest);
+        for name in ["workspace", "control-plane.key"] {
+            let from = src.join(name);
+            let to = dest.join(name);
+            if from.is_file() && !to.exists() {
+                let _ = std::fs::copy(&from, &to);
+            }
         }
     }
 }
@@ -175,7 +177,7 @@ pub fn resolve_project(raw: &str) -> Result<PathBuf, String> {
 /// Active workspace: env → pin file → `--cwd`/process cwd.
 pub fn resolve_workspace(fallback: &Path) -> PathBuf {
     migrate_from_legacy();
-    for var in ["HANDS_WORKSPACE", "GROK_HARNESS_WORKSPACE"] {
+    for var in ["PALMBRIDGE_WORKSPACE", "HANDS_WORKSPACE", "GROK_HARNESS_WORKSPACE"] {
         if let Ok(env_path) = std::env::var(var) {
             let p = PathBuf::from(env_path);
             if let Ok(c) = dunce::canonicalize(&p) {
@@ -326,7 +328,7 @@ fn add_auto_detected_lsp_servers(cwd: &Path, servers: &mut BTreeMap<String, LspS
 
 fn find_language_server(cwd: &Path, name: &str) -> Option<(String, Vec<String>)> {
     // Rustup proxies can be shadowed by repo-specific shims on PATH. Resolve
-    // the actual component first so Hands does not accidentally start a broken
+    // the actual component first so Palmbridge does not accidentally start a broken
     // rust-analyzer from another workspace.
     if name == "rust-analyzer"
         && let Ok(output) = Command::new("rustup").args(["which", "rust-analyzer"]).output()

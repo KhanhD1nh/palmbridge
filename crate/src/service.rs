@@ -17,21 +17,23 @@ pub const HEALTH_LISTEN: &str = "127.0.0.1:18780";
 pub const HEALTH_BASE: &str = "http://127.0.0.1:18780";
 pub const MCP_LISTEN: &str = "127.0.0.1:8787";
 pub const MCP_BASE: &str = "http://127.0.0.1:8787";
-pub const PROFILE: &str = "hands";
-const LABEL: &str = "dev.hands.tunnel";
+pub const PROFILE: &str = "palmbridge";
+const LABEL: &str = "dev.palmbridge.tunnel";
 #[cfg(target_os = "macos")]
-const MCP_LABEL: &str = "dev.hands.mcp";
+const MCP_LABEL: &str = "dev.palmbridge.mcp";
 #[cfg(target_os = "macos")]
-const WATCH_LABEL: &str = "dev.hands.watch";
-const LEGACY_LABEL: &str = "ai.grok.harness.tunnel";
-const LEGACY_PROFILE: &str = "grok-harness";
+const WATCH_LABEL: &str = "dev.palmbridge.watch";
+const LEGACY_LABELS: &[&str] = &["dev.hands.tunnel", "ai.grok.harness.tunnel"];
+const LEGACY_PROFILES: &[&str] = &["hands", "grok-harness"];
 
 pub fn profile_file() -> PathBuf {
     host::tunnel_client_dir().join(format!("{PROFILE}.yaml"))
 }
 
-fn legacy_profile_file() -> PathBuf {
-    host::tunnel_client_dir().join(format!("{LEGACY_PROFILE}.yaml"))
+fn legacy_profile_files() -> impl Iterator<Item = PathBuf> {
+    LEGACY_PROFILES
+        .iter()
+        .map(|profile| host::tunnel_client_dir().join(format!("{profile}.yaml")))
 }
 
 pub fn ready() -> bool {
@@ -77,7 +79,7 @@ pub fn status_line() -> String {
     let svc = if installed() {
         "enabled (login + restart)"
     } else {
-        "off — hands setup"
+        "off — palmbridge setup"
     };
     format!("{health}\nservice    {svc}")
 }
@@ -115,7 +117,7 @@ pub fn enable() -> Result<(), String> {
     install_supervisor()?;
     let _ = install_watch();
     if wait_ready(Duration::from_secs(15)) {
-        eprintln!("tunnel on. login start + restart. config: hands config");
+        eprintln!("tunnel on. login start + restart. config: palmbridge config");
         eprintln!("admin  {HEALTH_BASE}/ui");
         Ok(())
     } else {
@@ -211,7 +213,7 @@ fn can_enable() -> bool {
 
 fn persist_key() -> Result<PathBuf, String> {
     let k = crate::secrets::get().ok_or_else(|| {
-        "missing runtime key. run hands setup, or export CONTROL_PLANE_API_KEY".to_string()
+        "missing runtime key. run palmbridge setup, or export CONTROL_PLANE_API_KEY".to_string()
     })?;
     crate::secrets::ensure_file(&k)
 }
@@ -242,20 +244,22 @@ fn resolve_tunnel_id() -> Result<String, String> {
             return Ok(id.to_string());
         }
     }
-    for path in [profile_file(), legacy_profile_file()] {
-        if let Ok(text) = fs::read_to_string(path) {
-            for line in text.lines() {
-                let t = line.trim();
-                if let Some(rest) = t.strip_prefix("tunnel_id:") {
-                    let id = rest.trim().trim_matches('"').trim();
-                    if !id.is_empty() {
-                        return Ok(id.to_string());
-                    }
-                }
-            }
+    for path in std::iter::once(profile_file()).chain(legacy_profile_files()) {
+        if let Some(id) = read_tunnel_id(&path) {
+            return Ok(id);
         }
     }
-    Err("missing tunnel id. paste it in the config UI (hands config) or export CONTROL_PLANE_TUNNEL_ID".into())
+    Err("missing tunnel id. paste it in the config UI (palmbridge config) or export CONTROL_PLANE_TUNNEL_ID".into())
+}
+
+fn read_tunnel_id(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("tunnel_id:")
+            .map(|id| id.trim().trim_matches('"').trim().to_string())
+            .filter(|id| !id.is_empty())
+    })
 }
 
 fn write_profile(key: &Path, harness: &Path, tunnel_id: &str) -> Result<(), String> {
@@ -336,7 +340,7 @@ set -- "$CLIENT" run --profile {PROFILE} --log.level=warn --control-plane.poll-t
   --mcp.server-url "url=http://127.0.0.1/mcp,channel=main,unix-socket=$SOCK"
 # -is always. macOS ignores -s on battery; watch kickstarts on AC so -s
 # is taken while plugged in. Frozen -i from a battery start allowed lid-sleep.
-mode="${{HANDS_CAFFEINATE:-${{GROK_HARNESS_CAFFEINATE:-is}}}}"
+mode="${{PALMBRIDGE_CAFFEINATE:-${{HANDS_CAFFEINATE:-${{GROK_HARNESS_CAFFEINATE:-is}}}}}}"
 if [ "$mode" = "auto" ]; then
   mode=is
 fi
@@ -344,7 +348,7 @@ if [ -x /usr/bin/caffeinate ] && [ "$mode" != "off" ]; then
   exec /usr/bin/caffeinate -"$mode" -- "$@"
 fi
 if command -v systemd-inhibit >/dev/null 2>&1; then
-  exec systemd-inhibit --what=idle --who=hands --why="ChatGPT MCP tunnel" --mode=block "$@"
+  exec systemd-inhibit --what=idle --who=palmbridge --why="ChatGPT MCP tunnel" --mode=block "$@"
 fi
 exec "$@"
 "#,
@@ -362,7 +366,7 @@ exec "$@"
 
 fn harness_bin() -> Result<PathBuf, String> {
     if let Some(home) = dirs::home_dir() {
-        let local = home.join(".local/bin/hands");
+        let local = home.join(".local/bin/palmbridge");
         if local.is_file() {
             return Ok(dunce::canonicalize(&local).unwrap_or(local));
         }
@@ -494,13 +498,15 @@ fn install_supervisor() -> Result<(), String> {
     fs::write(&plist, xml).map_err(|e| format!("write {}: {e}", plist.display()))?;
     stop_unmanaged();
     let target = gui_target();
-    let _ = launchctl(&["disable", &format!("{target}/{LEGACY_LABEL}")]);
-    let _ = launchctl(&["bootout", &target, LEGACY_LABEL]);
-    let legacy_plist = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Library/LaunchAgents")
-        .join(format!("{LEGACY_LABEL}.plist"));
-    let _ = fs::remove_file(legacy_plist);
+    for label in LEGACY_LABELS {
+        let _ = launchctl(&["disable", &format!("{target}/{label}")]);
+        let _ = launchctl(&["bootout", &target, label]);
+        let legacy_plist = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Library/LaunchAgents")
+            .join(format!("{label}.plist"));
+        let _ = fs::remove_file(legacy_plist);
+    }
     let _ = launchctl(&["bootout", &target, LABEL]);
     let boot = launchctl(&["bootstrap", &target, &plist.display().to_string()]);
     if !boot.status.success() {
@@ -566,7 +572,7 @@ fn mcp_plist_path() -> PathBuf {
 
 #[cfg(target_os = "macos")]
 fn install_mcp() -> Result<(), String> {
-    let hands = harness_bin()?;
+    let palmbridge = harness_bin()?;
     let plist = mcp_plist_path();
     if let Some(parent) = plist.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -595,7 +601,7 @@ fn install_mcp() -> Result<(), String> {
 </dict>
 </plist>
 "#,
-        xml_escape(&hands.display().to_string()),
+        xml_escape(&palmbridge.display().to_string()),
         xml_escape(&out.display().to_string()),
         xml_escape(&err.display().to_string()),
     );
@@ -629,7 +635,7 @@ fn watch_plist_path() -> PathBuf {
 
 #[cfg(target_os = "macos")]
 fn install_watch() -> Result<(), String> {
-    let hands = harness_bin()?;
+    let palmbridge = harness_bin()?;
     let plist = watch_plist_path();
     if let Some(parent) = plist.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -656,7 +662,7 @@ fn install_watch() -> Result<(), String> {
 </dict>
 </plist>
 "#,
-        xml_escape(&hands.display().to_string()),
+        xml_escape(&palmbridge.display().to_string()),
         xml_escape(&out.display().to_string()),
         xml_escape(&err.display().to_string()),
     );
@@ -684,7 +690,7 @@ fn uninstall_watch() -> Result<(), String> {
 fn unit_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/systemd/user/hands-tunnel.service")
+        .join(".config/systemd/user/palmbridge-tunnel.service")
 }
 
 #[cfg(target_os = "linux")]
@@ -697,7 +703,7 @@ fn install_supervisor() -> Result<(), String> {
     let wrapper = wrapper_buf.display();
     let body = format!(
         r#"[Unit]
-Description=Hands ChatGPT tunnel
+Description=Palmbridge ChatGPT tunnel
 After=network-online.target
 Wants=network-online.target
 
@@ -714,8 +720,13 @@ WantedBy=default.target
     );
     fs::write(&unit, body).map_err(|e| format!("write {}: {e}", unit.display()))?;
     stop_unmanaged();
+    for legacy in ["hands-tunnel.service", "grok-harness-tunnel.service"] {
+        let _ = Command::new("systemctl")
+            .args(["--user", "disable", "--now", legacy])
+            .status();
+    }
     run_ok("systemctl", &["--user", "daemon-reload"])?;
-    run_ok("systemctl", &["--user", "enable", "--now", "hands-tunnel.service"])?;
+    run_ok("systemctl", &["--user", "enable", "--now", "palmbridge-tunnel.service"])?;
     let _ = install_watch();
     Ok(())
 }
@@ -724,19 +735,19 @@ WantedBy=default.target
 fn mcp_unit_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/systemd/user/hands-mcp.service")
+        .join(".config/systemd/user/palmbridge-mcp.service")
 }
 
 #[cfg(target_os = "linux")]
 fn install_mcp() -> Result<(), String> {
-    let hands = harness_bin()?;
+    let palmbridge = harness_bin()?;
     let unit = mcp_unit_path();
     if let Some(parent) = unit.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     let body = format!(
         r#"[Unit]
-Description=Hands MCP HTTP
+Description=Palmbridge MCP HTTP
 After=network-online.target
 
 [Service]
@@ -748,18 +759,18 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 "#,
-        bin = hands.display()
+        bin = palmbridge.display()
     );
     fs::write(&unit, body).map_err(|e| format!("write {}: {e}", unit.display()))?;
     run_ok("systemctl", &["--user", "daemon-reload"])?;
-    run_ok("systemctl", &["--user", "enable", "--now", "hands-mcp.service"])?;
+    run_ok("systemctl", &["--user", "enable", "--now", "palmbridge-mcp.service"])?;
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn uninstall_mcp() -> Result<(), String> {
     let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", "hands-mcp.service"])
+        .args(["--user", "disable", "--now", "palmbridge-mcp.service"])
         .status();
     let unit = mcp_unit_path();
     if unit.exists() {
@@ -772,20 +783,20 @@ fn uninstall_mcp() -> Result<(), String> {
 fn watch_unit_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/systemd/user/hands-watch.service")
+        .join(".config/systemd/user/palmbridge-watch.service")
 }
 
 #[cfg(target_os = "linux")]
 fn install_watch() -> Result<(), String> {
-    let hands = harness_bin()?;
+    let palmbridge = harness_bin()?;
     let unit = watch_unit_path();
     if let Some(parent) = unit.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     let body = format!(
         r#"[Unit]
-Description=Hands tunnel down notifier
-After=hands-tunnel.service
+Description=Palmbridge tunnel down notifier
+After=palmbridge-tunnel.service
 
 [Service]
 Type=simple
@@ -796,18 +807,18 @@ RestartSec=10
 [Install]
 WantedBy=default.target
 "#,
-        hands.display()
+        palmbridge.display()
     );
     fs::write(&unit, body).map_err(|e| format!("write {}: {e}", unit.display()))?;
     run_ok("systemctl", &["--user", "daemon-reload"])?;
-    run_ok("systemctl", &["--user", "enable", "--now", "hands-watch.service"])?;
+    run_ok("systemctl", &["--user", "enable", "--now", "palmbridge-watch.service"])?;
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn uninstall_watch() -> Result<(), String> {
     let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", "hands-watch.service"])
+        .args(["--user", "disable", "--now", "palmbridge-watch.service"])
         .status();
     let unit = watch_unit_path();
     if unit.exists() {
@@ -818,13 +829,13 @@ fn uninstall_watch() -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn start_supervisor() -> Result<(), String> {
-    run_ok("systemctl", &["--user", "start", "hands-tunnel.service"])
+    run_ok("systemctl", &["--user", "start", "palmbridge-tunnel.service"])
 }
 
 #[cfg(target_os = "linux")]
 fn stop_supervisor() -> Result<(), String> {
     let _ = Command::new("systemctl")
-        .args(["--user", "stop", "hands-tunnel.service"])
+        .args(["--user", "stop", "palmbridge-tunnel.service"])
         .status();
     stop_unmanaged();
     Ok(())
@@ -833,7 +844,7 @@ fn stop_supervisor() -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn uninstall_supervisor() -> Result<(), String> {
     let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", "hands-tunnel.service"])
+        .args(["--user", "disable", "--now", "palmbridge-tunnel.service"])
         .status();
     let _ = uninstall_watch();
     let _ = uninstall_mcp();
@@ -866,7 +877,7 @@ fn start_supervisor() -> Result<(), String> {
 
 #[cfg(windows)]
 fn stop_supervisor() -> Result<(), String> {
-    let pid_file = host::config_dir().join("hands-tunnel.pid");
+    let pid_file = host::config_dir().join("palmbridge-tunnel.pid");
     if let Ok(pid) = fs::read_to_string(&pid_file) {
         let pid = pid.trim();
         if !pid.is_empty() {
@@ -892,16 +903,16 @@ fn uninstall_supervisor() -> Result<(), String> {
     stop_supervisor()
 }
 
-// Windows: no KeepAlive supervisor (no LaunchAgent/systemd); `hands setup`
+// Windows: no KeepAlive supervisor (no LaunchAgent/systemd); `palmbridge setup`
 // starts the tunnel in a detached background process. Reboot or crash means
-// `hands start` again — manual restart, matching the test scope.
+// `palmbridge start` again — manual restart, matching the test scope.
 #[cfg(windows)]
 fn spawn_tunnel() -> Result<(), String> {
     let wrapper = wrapper_path();
     if !wrapper.is_file() {
         return Err(format!("wrapper missing: {}", wrapper.display()));
     }
-    let pid_file = host::config_dir().join("hands-tunnel.pid");
+    let pid_file = host::config_dir().join("palmbridge-tunnel.pid");
     let ps = format!(
         "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','{w}' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath '{pf}' -Value $p.Id",
         w = wrapper.display(),
@@ -981,7 +992,7 @@ fn stop_unmanaged() {
         if !cmd.contains("tunnel-client") {
             continue;
         }
-        let ours = cmd.contains("run --profile hands") || cmd.contains("run --profile grok-harness");
+        let ours = cmd.contains("run --profile palmbridge") || LEGACY_PROFILES.iter().any(|profile| cmd.contains(&format!("run --profile {profile}")));
         if !ours || cmd.contains("pkill") {
             continue;
         }

@@ -14,9 +14,9 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            asset: hands-macos-aarch64
+            asset: palmbridge-macos-aarch64
           - os: ubuntu-24.04
-            asset: hands-linux-x86_64
+            asset: palmbridge-linux-x86_64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -40,12 +40,12 @@ jobs:
 
       - name: Build
         working-directory: .grok-build
-        run: cargo build --release -p hands
+        run: cargo build --release -p palmbridge
 
       - name: Pack
         run: |
           mkdir -p dist
-          cp .grok-build/target/release/hands "dist/${{ matrix.asset }}"
+          cp .grok-build/target/release/palmbridge "dist/${{ matrix.asset }}"
           chmod +x "dist/${{ matrix.asset }}"
 
       - uses: actions/upload-artifact@v4
@@ -64,7 +64,7 @@ jobs:
       - name: Flatten
         run: |
           mkdir -p release
-          find dist -type f -name 'hands-*' -exec cp {} release/ \;
+          find dist -type f -name 'palmbridge-*' -exec cp {} release/ \;
           ls -la release
       - uses: softprops/action-gh-release@v2
         with:

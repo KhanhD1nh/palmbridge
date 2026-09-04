@@ -7,8 +7,9 @@ import shutil
 import sys
 from pathlib import Path
 
-MEMBER = '    "crates/codegen/hands",'
+MEMBER = '    "crates/codegen/palmbridge",'
 OLD_MEMBER = '    "crates/codegen/grok-harness",'
+LEGACY_MEMBER = '    "crates/codegen/hands",'
 
 
 def main() -> int:
@@ -18,11 +19,14 @@ def main() -> int:
     src_repo = Path(sys.argv[1]).resolve()
     grok_build = Path(sys.argv[2]).resolve()
     crate_src = src_repo / "crate"
-    dest = grok_build / "crates" / "codegen" / "hands"
+    dest = grok_build / "crates" / "codegen" / "palmbridge"
     if not (crate_src / "Cargo.toml").is_file():
         print(f"missing crate at {crate_src}", file=sys.stderr)
         return 1
     old = grok_build / "crates" / "codegen" / "grok-harness"
+    legacy_dest = grok_build / "crates" / "codegen" / "hands"
+    if legacy_dest.exists():
+        shutil.rmtree(legacy_dest)
     if old.exists():
         shutil.rmtree(old)
     if dest.exists():
@@ -33,6 +37,9 @@ def main() -> int:
     text = root.read_text()
     if OLD_MEMBER in text:
         text = text.replace(OLD_MEMBER, MEMBER, 1)
+        root.write_text(text)
+    elif LEGACY_MEMBER in text:
+        text = text.replace(LEGACY_MEMBER, MEMBER, 1)
         root.write_text(text)
     elif MEMBER.strip() not in text:
         needle = '    "crates/codegen/xai-grok-tools",'

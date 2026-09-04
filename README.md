@@ -39,7 +39,7 @@ sequenceDiagram
 | `palmbridge --http` | MCP HTTP server and local configuration UI | `127.0.0.1:8787` |
 | `tunnel-client` | Authenticated outbound connection to OpenAI | OpenAI control plane; health endpoint `127.0.0.1:18780` when running |
 | Workspace pin | Defines the default repository for tools | `~/.config/palmbridge/workspace` on Unix; `%APPDATA%\palmbridge\workspace` on Windows |
-| Tunnel profile | Maps `tunnel-client` to Palmbridge | `~/.config/tunnel-client/palmbridge.yaml` |
+| Tunnel profile | Maps `tunnel-client` to Palmbridge | `~/.config/tunnel-client/palmbridge.yaml` on Unix; `%APPDATA%\tunnel-client\palmbridge.yaml` on Windows |
 | Runtime key file | Read by `tunnel-client`, never sent through MCP | Palmbridge config directory, `0600` on Unix |
 
 `palmbridge config --open` serves only on loopback. It is a local control page, not a public dashboard.

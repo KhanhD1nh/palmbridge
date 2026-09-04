@@ -137,8 +137,10 @@ pub fn start() -> Result<(), String> {
     if !installed() {
         return enable();
     }
-    let _ = install_mcp();
-    let _ = wait_mcp(Duration::from_secs(8));
+    install_mcp()?;
+    if !wait_mcp(Duration::from_secs(8)) {
+        return Err(format!("MCP HTTP not up on {MCP_BASE}"));
+    }
     start_supervisor()?;
     if wait_ready(Duration::from_secs(15)) {
         eprintln!("tunnel ready  {HEALTH_BASE}/ui");
@@ -900,29 +902,40 @@ fn uninstall_supervisor() -> Result<(), String> {
     stop_supervisor()
 }
 
-// Windows: no KeepAlive supervisor (no LaunchAgent/systemd); `palmbridge setup`
-// starts the tunnel in a detached background process. Reboot or crash means
-// `palmbridge start` again — manual restart, matching the test scope.
+// Windows has no persistent supervisor: start the tunnel-client directly and
+// retain its PID so `palmbridge stop` terminates the exact child it started.
 #[cfg(windows)]
 fn spawn_tunnel() -> Result<(), String> {
-    let wrapper = wrapper_path();
-    if !wrapper.is_file() {
-        return Err(format!("wrapper missing: {}", wrapper.display()));
-    }
     let pid_file = host::config_dir().join("palmbridge-tunnel.pid");
-    let ps = format!(
-        "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','{w}' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath '{pf}' -Value $p.Id",
-        w = wrapper.display(),
-        pf = pid_file.display(),
-    );
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &ps])
-        .output()
-        .map_err(|e| format!("powershell: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    if let Ok(pid) = fs::read_to_string(&pid_file) {
+        let _ = Command::new("taskkill")
+            .args(["/PID", pid.trim(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
-    Ok(())
+    let _ = fs::remove_file(&pid_file);
+    std::thread::sleep(Duration::from_millis(300));
+
+    let child = Command::new(tunnel_client_bin()?)
+        .args([
+            "run",
+            "--profile",
+            PROFILE,
+            "--log.level=warn",
+            "--control-plane.poll-timeout=60s",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("start tunnel-client: {e}"))?;
+    fs::create_dir_all(host::config_dir()).map_err(|e| format!("mkdir config: {e}"))?;
+    fs::write(
+        host::config_dir().join("palmbridge-tunnel.pid"),
+        child.id().to_string(),
+    )
+    .map_err(|e| format!("record tunnel pid: {e}"))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]

@@ -38,8 +38,12 @@ pub fn config_dir() -> PathBuf {
 }
 
 pub fn tunnel_client_dir() -> PathBuf {
-    // tunnel-client (OpenAI) always reads its profile from ~/.config/tunnel-client,
-    // including on Windows — NOT %APPDATA%. Match that so palmbridge.yaml is found.
+    #[cfg(windows)]
+    {
+        return dirs::config_dir()
+            .unwrap_or_else(|| home_dir().join("AppData/Roaming"))
+            .join("tunnel-client");
+    }
     home_dir().join(".config/tunnel-client")
 }
 

@@ -11,7 +11,7 @@ Fork of [nghyane/hands](https://github.com/nghyane/hands). Not affiliated with O
 ## How it works
 
 1. `palmbridge setup` pins the current directory as the active workspace, stores tunnel credentials, writes a `tunnel-client` profile, and starts local services.
-2. On macOS and Linux, `palmbridge --http` starts an MCP server on `127.0.0.1:8787` and a private Unix socket for `tunnel-client`. Windows uses the installed tunnel-client profile and its detached tunnel process.
+2. On macOS and Linux, `palmbridge --http` starts an MCP server on `127.0.0.1:8787` and a private Unix socket for `tunnel-client`. Windows starts the same loopback MCP server as a companion process; its tunnel-client profile connects through `http://127.0.0.1:8787/mcp`.
 3. `tunnel-client` authenticates to OpenAI using the restricted runtime key and binds the selected `tunnel_...` ID to the local MCP server.
 4. ChatGPT's Tunnel connection sends MCP requests through that existing tunnel. Palmbridge executes the requested tool against the pinned workspace and returns the result through the same path.
 
@@ -64,7 +64,7 @@ Use a separate OS account or a dedicated working directory when the machine cont
 |---|---|---|
 | macOS | LaunchAgents start and keep services alive after login | AC power prevents idle sleep while tunnel waits; lid close on battery may suspend it |
 | Linux | systemd user services start and restart services | Host/user session policy controls sleep and login behavior |
-| Windows | Detached `tunnel-client` process started by `palmbridge setup` or `palmbridge start` | No persistent supervisor; run `palmbridge start` after reboot or a crash |
+| Windows | `palmbridge --http` and detached `tunnel-client` processes started by `palmbridge setup` or `palmbridge start` | No persistent supervisor; run `palmbridge start` after reboot or a crash |
 
 ## Security model
 

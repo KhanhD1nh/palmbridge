@@ -16,17 +16,28 @@ pub fn run(arguments: &Value, cwd: &Path) -> Result<String, String> {
         return Err("glob requires a non-empty pattern".into());
     }
 
-    let search_dir = arguments
+    let workspace = dunce::canonicalize(cwd)
+        .map_err(|e| format!("canonicalize workspace {}: {e}", cwd.display()))?;
+    let requested = arguments
         .get("path")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .map(|p| if p.is_absolute() { p } else { cwd.join(p) })
-        .unwrap_or_else(|| cwd.to_path_buf());
-
-    if !search_dir.is_dir() {
-        return Err(format!("glob path is not a directory: {}", search_dir.display()));
-    }
+        .filter(|s| !s.is_empty());
+    let search_dir = match requested {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            let path = if path.is_absolute() { path } else { workspace.join(path) };
+            if !path.is_dir() {
+                return Err(format!("glob path is not a directory: {}", path.display()));
+            }
+            let path = dunce::canonicalize(&path)
+                .map_err(|e| format!("canonicalize glob path {}: {e}", path.display()))?;
+            if !path.starts_with(&workspace) {
+                return Err(format!("glob path escapes workspace: {}", path.display()));
+            }
+            path
+        }
+        None => workspace,
+    };
 
     let matcher = compile_matcher(pattern)?;
     let mut matches = Vec::new();

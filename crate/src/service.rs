@@ -106,9 +106,8 @@ pub fn enable() -> Result<(), String> {
     host::migrate_from_legacy();
     let key = persist_key()?;
     let tunnel_id = resolve_tunnel_id()?;
-    let harness = harness_bin()?;
     let client = tunnel_client_bin()?;
-    write_profile(&key, &harness, &tunnel_id)?;
+    write_profile(&key, &tunnel_id)?;
     write_wrapper(&client)?;
     install_mcp()?;
     if !wait_mcp(Duration::from_secs(8)) {
@@ -262,21 +261,25 @@ fn read_tunnel_id(path: &Path) -> Option<String> {
     })
 }
 
-fn write_profile(key: &Path, harness: &Path, tunnel_id: &str) -> Result<(), String> {
+fn write_profile(key: &Path, tunnel_id: &str) -> Result<(), String> {
     let path = profile_file();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     let mut key_path = key.display().to_string();
-    let mut sock = host::mcp_socket().display().to_string();
-    let _harness = harness.display().to_string();
     // YAML double-quoted scalars treat backslashes as escapes ("\U" → unicode).
     // Windows paths must use forward slashes (accepted by Go and Command::new).
     #[cfg(windows)]
     {
         key_path = key_path.replace('\\', "/");
-        sock = sock.replace('\\', "/");
     }
+    #[cfg(windows)]
+    let mcp_server = format!("    - channel: main\n      url: \"{MCP_BASE}/mcp\"\n");
+    #[cfg(not(windows))]
+    let mcp_server = format!(
+        "    - channel: main\n      url: \"http://127.0.0.1/mcp\"\n      unix_socket: \"{}\"\n",
+        host::mcp_socket().display()
+    );
     let yaml = format!(
         r#"config_version: 1
 control_plane:
@@ -293,10 +296,7 @@ log:
 mcp:
   startup_wait_timeout: 30s
   server_urls:
-    - channel: main
-      url: "http://127.0.0.1/mcp"
-      unix_socket: "{sock}"
-"#
+{mcp_server}"#
     );
     fs::write(&path, yaml).map_err(|e| format!("write {}: {e}", path.display()))?;
     #[cfg(unix)]
@@ -318,6 +318,7 @@ fn write_wrapper(client: &Path) -> Result<(), String> {
     let dir = host::config_dir();
     fs::create_dir_all(dir.join("logs")).map_err(|e| format!("mkdir logs: {e}"))?;
     let path = wrapper_path();
+    #[cfg(not(windows))]
     let sock = host::mcp_socket();
     let client = client.display();
     #[cfg(windows)]
@@ -700,7 +701,7 @@ fn install_supervisor() -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     let wrapper_buf = wrapper_path();
-    let wrapper = wrapper_buf.display();
+    let wrapper = systemd_exec_path(&wrapper_buf);
     let body = format!(
         r#"[Unit]
 Description=Palmbridge ChatGPT tunnel
@@ -759,7 +760,7 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 "#,
-        bin = palmbridge.display()
+        bin = systemd_exec_path(&palmbridge)
     );
     fs::write(&unit, body).map_err(|e| format!("write {}: {e}", unit.display()))?;
     run_ok("systemctl", &["--user", "daemon-reload"])?;
@@ -807,7 +808,7 @@ RestartSec=10
 [Install]
 WantedBy=default.target
 "#,
-        palmbridge.display()
+        systemd_exec_path(&palmbridge)
     );
     fs::write(&unit, body).map_err(|e| format!("write {}: {e}", unit.display()))?;
     run_ok("systemctl", &["--user", "daemon-reload"])?;
@@ -877,23 +878,19 @@ fn start_supervisor() -> Result<(), String> {
 
 #[cfg(windows)]
 fn stop_supervisor() -> Result<(), String> {
+    uninstall_mcp()?;
     let pid_file = host::config_dir().join("palmbridge-tunnel.pid");
     if let Ok(pid) = fs::read_to_string(&pid_file) {
         let pid = pid.trim();
         if !pid.is_empty() {
-    let _ = Command::new("taskkill")
-        .args(["/PID", pid, "/T", "/F"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+            let _ = Command::new("taskkill")
+                .args(["/PID", pid, "/T", "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
             let _ = fs::remove_file(&pid_file);
         }
     }
-    let _ = Command::new("taskkill")
-        .args(["/IM", "tunnel-client.exe", "/F"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
     std::thread::sleep(Duration::from_millis(300));
     Ok(())
 }
@@ -953,13 +950,42 @@ fn install_watch() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn install_mcp() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn uninstall_mcp() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn install_mcp() -> Result<(), String> {
+    uninstall_mcp()?;
+    let child = Command::new(harness_bin()?)
+        .args(["--http", "--port", "8787"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("start MCP HTTP: {e}"))?;
+    fs::create_dir_all(host::config_dir()).map_err(|e| format!("mkdir config: {e}"))?;
+    fs::write(host::config_dir().join("palmbridge-mcp.pid"), child.id().to_string())
+        .map_err(|e| format!("record MCP pid: {e}"))
+}
+
+#[cfg(windows)]
+fn uninstall_mcp() -> Result<(), String> {
+    let pid_file = host::config_dir().join("palmbridge-mcp.pid");
+    if let Ok(pid) = fs::read_to_string(&pid_file) {
+        let _ = Command::new("taskkill")
+            .args(["/PID", pid.trim(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = fs::remove_file(pid_file);
     Ok(())
 }
 
@@ -969,14 +995,7 @@ fn install_watch() -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn stop_unmanaged() {
-    let _ = Command::new("taskkill")
-        .args(["/IM", "tunnel-client.exe", "/F"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    std::thread::sleep(Duration::from_millis(300));
-}
+fn stop_unmanaged() {}
 
 #[cfg(not(windows))]
 fn stop_unmanaged() {
@@ -1036,6 +1055,10 @@ fn run_ok(bin: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn systemd_exec_path(path: &Path) -> String {
+    format!("\"{}\"", path.display().to_string().replace('\\', "\\\\").replace('"', "\\\""))
+}
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

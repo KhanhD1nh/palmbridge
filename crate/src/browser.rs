@@ -87,12 +87,15 @@ async fn start_persistent(arguments: &Value) -> Result<String, String> {
     let headless = arguments.get("headless").and_then(Value::as_bool).unwrap_or(false);
     let url = arguments.get("url").and_then(Value::as_str).unwrap_or("about:blank");
 
-    let child = spawn_browser(&browser, port, &profile, width, height, headless, url)?;
+    let mut child = spawn_browser(&browser, port, &profile, width, height, headless, url)?;
     let pid = child.id();
+    if let Err(error) = wait_for_cdp(port, Duration::from_secs(8)).await {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
     write_browser_state(pid, port)?;
     std::mem::forget(child);
-
-    wait_for_cdp(port, Duration::from_secs(8)).await?;
     Ok(format!(
         "Started Palmbridge browser (pid {pid}) on debug port {port}.\nProfile: {}\nURL: {url}\nIf the app requires authentication, sign in once in this browser; later browser inspect/eval calls can reuse the session.",
         profile.display()
@@ -227,15 +230,10 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data)
                 .map_err(|e| format!("decode screenshot: {e}"))?;
-            let output_path = arguments
-                .get("output_path")
-                .and_then(Value::as_str)
-                .map(PathBuf::from)
-                .map(|p| if p.is_absolute() { p } else { cwd.join(p) })
-                .unwrap_or_else(|| std::env::temp_dir().join(format!("palmbridge-browser-{}.png", now_millis())));
-            if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| format!("create screenshot directory: {e}"))?;
-            }
+            let output_path = match arguments.get("output_path").and_then(Value::as_str) {
+                Some(path) => workspace_output_path(cwd, path)?,
+                None => std::env::temp_dir().join(format!("palmbridge-browser-{}.png", now_millis())),
+            };
             fs::write(&output_path, bytes).map_err(|e| format!("write screenshot: {e}"))?;
             format!("Screenshot: {}", output_path.display())
         }
@@ -245,6 +243,30 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
     let _ = ws.close(None).await;
     drop(ephemeral);
     Ok(output)
+}
+
+fn workspace_output_path(cwd: &Path, output: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(output);
+    if relative.as_os_str().is_empty() || relative.is_absolute() {
+        return Err("browser screenshot output_path must be a non-empty path within the workspace".into());
+    }
+    if relative.components().any(|component| matches!(component, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))) {
+        return Err("browser screenshot output_path must not escape the workspace".into());
+    }
+    let workspace = dunce::canonicalize(cwd)
+        .map_err(|e| format!("canonicalize workspace {}: {e}", cwd.display()))?;
+    let output_path = workspace.join(relative);
+    let resolved = if output_path.exists() {
+        dunce::canonicalize(&output_path)
+    } else {
+        let parent = output_path.parent().ok_or("browser screenshot output_path has no parent")?;
+        dunce::canonicalize(parent)
+    }
+    .map_err(|e| format!("canonicalize screenshot output path: {e}"))?;
+    if !resolved.starts_with(&workspace) {
+        return Err("browser screenshot output_path escapes the workspace".into());
+    }
+    Ok(output_path)
 }
 
 // Helper used only to keep the fallback expression in run_page_operation readable.

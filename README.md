@@ -1,91 +1,142 @@
-# Hands
+# Palmbridge
 
-Unofficial **ChatGPT plugin**: local coding tools over MCP. No local LLM. ChatGPT is the brain; this machine is the hands.
-
-Not affiliated with OpenAI or xAI. Tool runtime is [Grok Build](https://github.com/xai-org/grok-build) (Apache-2.0).
+Use ChatGPT Web as the model and a Mac as the local coding-tool runtime. Palmbridge exposes your selected workspace through MCP; it does not run a local model.
 
 ```text
-ChatGPT Web  →  Secure MCP Tunnel  →  hands  →  your repo
+ChatGPT Web → OpenAI tunnel → Palmbridge on your Mac → selected repository
 ```
 
-## Install
+Fork of [nghyane/hands](https://github.com/nghyane/hands). Not affiliated with OpenAI or xAI. The tool runtime is [Grok Build](https://github.com/xai-org/grok-build) (Apache-2.0).
 
-Needs `git`, `python3`, `rustup`. macOS or Linux. First build compiles grok-build (several minutes).
+## macOS quick start
+
+### 1. Install prerequisites
 
 ```bash
-git clone https://github.com/nghyane/hands.git
-cd hands
+xcode-select --install
+brew install git python rustup openai/tools/tunnel-client
+rustup default stable
+```
+
+`install.sh` builds Palmbridge from source. First build downloads and compiles Grok Build; expect several minutes.
+
+### 2. Install Palmbridge
+
+```bash
+git clone https://github.com/KhanhD1nh/palmbridge.git
+cd palmbridge
 ./install.sh
 ```
 
-Agents: see `AGENTS.md`. One-shot if keys are already in the environment:
+The executable is installed at `~/.local/bin/hands`. Add it to your shell path if needed:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+hands --version
+```
+
+### 3. Create tunnel credentials
+
+Create a **restricted** OpenAI API key with only **Tunnels: Read** and **Tunnels: Use**:
+
+- https://platform.openai.com/settings/organization/api-keys
+
+Create or copy a tunnel ID:
+
+- https://platform.openai.com/settings/organization/tunnels
+
+### 4. Select a repository and start the tunnel
+
+```bash
+cd /path/to/your/repository
+hands setup
+```
+
+The interactive checklist asks for the runtime key and `tunnel_...` ID. The key is stored in macOS Keychain; Palmbridge starts the tunnel and copies its ID to the clipboard.
+
+Non-interactive setup:
 
 ```bash
 export CONTROL_PLANE_API_KEY="sk-..."
 export CONTROL_PLANE_TUNNEL_ID="tunnel_..."
-./install.sh
+cd /path/to/your/repository
+hands setup
 ```
 
-## Zero config
+On macOS, Palmbridge installs a LaunchAgent so the tunnel starts automatically. Check it with:
 
 ```bash
-brew install openai/tools/tunnel-client   # once
-cd /path/to/your/repo
-hands setup                               # TTY checklist, Keychain, no browser
+hands status --json
 ```
 
-Runtime key goes in the macOS Keychain (file `0600` only for the daemon). Tunnel id is copied to the clipboard. Notification if the tunnel drops.
+### 5. Connect ChatGPT Web
 
-Config page (optional): `hands config --open` → http://127.0.0.1:8787/  
-Scripts: `hands status --json`.
+1. Open https://chatgpt.com/plugins.
+2. Enable Developer mode.
+3. Create a **Tunnel** connection.
+4. Paste the copied `tunnel_...` ID.
+5. Scan tools.
 
-## ChatGPT Web
+The connection appears as **Hands** because the executable and MCP server retain the upstream-compatible name.
 
-1. Runtime key (Restricted, Tunnels **Read** + **Use**):  
-   https://platform.openai.com/settings/organization/api-keys
-2. Tunnel id:  
-   https://platform.openai.com/settings/organization/tunnels
-3. [chatgpt.com/plugins](https://chatgpt.com/plugins) → Developer mode → Connection **Tunnel** → paste tunnel id → Scan tools.
+## Daily use
 
-Plugin name in ChatGPT: **Hands**.
+Pin a workspace before asking ChatGPT to work in it:
 
-ChatGPT, not Hands, shows Confirm. MCP cannot turn that off.
+```bash
+cd /path/to/repository
+hands use
+```
 
-- Reads auto-run (`readOnlyHint`).
-- File edits are routine (`destructiveHint: false`) — auto under **Important actions**.
-- Shell / kill still confirm unless you opt in.
+Then use the ChatGPT connection normally. `workspace_info` shows the pinned directory; `set_workspace` can switch it from ChatGPT.
 
-**Unattended coding:** first write prompt → **Always allow**, or **Settings → Apps → Hands → Never ask**. New chats keep that app setting. Developer Mode “remember for this conversation” dies on a new chat.
+```bash
+hands start            # start tunnel
+hands stop             # stop tunnel
+hands enable           # install/start automatic service
+hands disable          # stop/remove automatic service
+hands config --open    # local configuration UI at http://127.0.0.1:8787/
+hands status --json    # machine-readable status
+```
+
+Mac stays awake while connected to AC. Closing the lid on battery can suspend the tunnel.
+
+## ChatGPT approvals
+
+ChatGPT controls approvals, not Palmbridge:
+
+- Read-only tools can auto-run.
+- Edits are normal actions.
+- Shell commands and task termination require approval unless allowed in ChatGPT settings.
+
+For unattended edits, approve the first write with **Always allow**, or use **Settings → Apps → Hands → Never ask**. That setting persists across chats.
 
 ## Tools
 
-| Tool | Role |
+| Tool | Purpose |
 |---|---|
-| `workspace_info` | current pin + recent |
-| `set_workspace` | pin another folder (works from ChatGPT, including away) |
-| `read_file` | read |
-| `grep` | search contents |
-| `list_dir` | tree |
-| `glob` | find files by name |
-| `lsp` | code intelligence via language servers (definitions, references, symbols, hover) |
-| `browser` | inspect localhost Chromium DOM/computed styles, run JS, capture screenshots |
-| `search_replace` | edit existing |
-| `write` | create / overwrite |
-| `apply_patch` | multi-hunk patch |
-| `todo_write` | task list |
-| `run_terminal_cmd` | tests / git / shell; long FG auto-backgrounds |
-| `get_task_output` | poll background job |
-| `kill_task` | stop background job |
+| `workspace_info` | Active workspace and recent folders |
+| `set_workspace` | Pin another workspace |
+| `read_file`, `grep`, `list_dir`, `glob` | Read and search files |
+| `lsp` | Definitions, references, symbols, hover |
+| `browser` | Inspect local Chromium pages, run JS, screenshots |
+| `search_replace`, `write`, `apply_patch` | Edit files |
+| `todo_write` | Track work |
+| `run_terminal_cmd` | Run commands and tests |
+| `get_task_output`, `kill_task` | Manage background commands |
 
-Debug: `hands list`, `hands call read_file '{"target_file":"README.md"}'`.
+LSP detects `.grok/lsp.json`, project `node_modules/.bin`, npm-global servers, and `rust-analyzer`. `browser` supports Chrome, Brave, Edge, and Chromium; `browser start` creates a persistent local profile for authenticated localhost development.
 
-`glob` is implemented natively by Hands on Windows, so it does not require `rg` to be on PATH.
-LSP auto-detects project/user `.grok/lsp.json`, local `node_modules/.bin`, npm global language servers,
-and `rustup which rust-analyzer`. Browser inspection supports Chrome, Brave, Edge, or Chromium and is
-intended for local development/debugging; `browser start` creates a persistent Hands browser profile
-that can be signed into once and reused for authenticated localhost apps.
+## Debugging
 
-On AC the Mac stays awake for the long-poll; on battery, closing the lid may sleep.
+```bash
+hands list
+hands call read_file '{"target_file":"README.md"}'
+hands status --json
+```
+
+If `hands` is not found after installation, run `export PATH="$HOME/.local/bin:$PATH"` or add it to `~/.zshrc`.
 
 ## License
 

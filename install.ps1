@@ -24,7 +24,15 @@ if (Test-Path "$GROK_BUILD\.git") {
     if ($LASTEXITCODE -ne 0) { git clone --depth 1 $GROK_BUILD_URL $GROK_BUILD }
 }
 
-py "$RepoRoot\scripts\inject.py" $RepoRoot $GROK_BUILD
+$Python = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python*\python.exe" -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty FullName
+if (-not $Python) {
+    $Python = (Get-Command py -ErrorAction SilentlyContinue).Source
+}
+if (-not $Python) {
+    throw "Python 3 is required. Install: https://www.python.org/downloads/windows/"
+}
+& $Python "$RepoRoot\scripts\inject.py" $RepoRoot $GROK_BUILD
 if ($LASTEXITCODE -ne 0) { throw "inject.py failed" }
 
 # Windows-only: xai-proto-build invokes protoc with /dev/stdout + /dev/null

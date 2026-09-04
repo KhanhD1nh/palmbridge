@@ -477,6 +477,22 @@ where
             }
             continue;
         }
+        if path_only == "/.well-known/oauth-protected-resource"
+            || path_only == "/.well-known/oauth-protected-resource/mcp"
+        {
+            write_http(
+                &mut writer,
+                200,
+                "application/json",
+                br#"{"resource":"http://127.0.0.1:8787/mcp"}"#,
+                keep,
+            )
+            .await?;
+            if !keep {
+                return Ok(());
+            }
+            continue;
+        }
         if path_only.contains("/.well-known/")
             || (method == "GET" && path_only == "/" && !accept.to_lowercase().contains("text/html"))
         {

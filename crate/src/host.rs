@@ -1,12 +1,16 @@
 //! Workspace pin + ToolBridge. Unofficial; runtime from xai-org/grok-build.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use xai_grok_tools::bridge::ToolBridge;
 use xai_grok_tools::computer::local::{LocalFs, LocalTerminalBackend};
 use xai_grok_tools::implementations::codex::ApplyPatchTool;
+use xai_grok_tools::implementations::grok_build::LspTool;
+use xai_grok_tools::implementations::lsp::config::{LspServerConfig, load_servers};
+use xai_grok_tools::implementations::lsp::{LspBackend, LspBackendAdapter, LspManager};
 use xai_grok_tools::implementations::{
     BashTool, GrepTool, KillTaskTool, ListDirTool, OpenCodeGlobTool, OpenCodeWriteTool,
     ReadFileTool, SearchReplaceTool, TaskOutputTool, TodoWriteTool,
@@ -34,12 +38,8 @@ pub fn config_dir() -> PathBuf {
 }
 
 pub fn tunnel_client_dir() -> PathBuf {
-    #[cfg(windows)]
-    {
-        return dirs::config_dir()
-            .unwrap_or_else(|| home_dir().join("AppData/Roaming"))
-            .join("tunnel-client");
-    }
+    // tunnel-client (OpenAI) always reads its profile from ~/.config/tunnel-client,
+    // including on Windows — NOT %APPDATA%. Match that so hands.yaml is found.
     home_dir().join(".config/tunnel-client")
 }
 
@@ -202,6 +202,7 @@ fn allowlist() -> ToolServerConfig {
             ToolConfig::from(&OpenCodeWriteTool),
             ToolConfig::from(&ApplyPatchTool),
             ToolConfig::from(&TodoWriteTool),
+            ToolConfig::from(&LspTool),
             ToolConfig::from(&BashTool)
                 .with_param("enabled_background", true)
                 .with_param("auto_background_on_timeout", true),
@@ -215,13 +216,15 @@ fn allowlist() -> ToolServerConfig {
 fn session_context(cwd: PathBuf) -> SessionContext {
     let host_dir = std::env::temp_dir().join(APP);
     let _ = std::fs::create_dir_all(&host_dir);
+    let notification_handle = ToolNotificationHandle::noop();
+    let lsp = build_lsp_backend(&cwd, notification_handle.clone());
     SessionContext {
         backend: Arc::new(LocalTerminalBackend::new()),
         fs: Arc::new(LocalFs),
         cwd,
         session_folder: host_dir.join("session"),
         session_env: Arc::new(HashMap::new()),
-        notification_handle: ToolNotificationHandle::noop(),
+        notification_handle,
         owner_session_id: None,
         subagent: None,
         parent_scheduler_handle: None,
@@ -230,7 +233,7 @@ fn session_context(cwd: PathBuf) -> SessionContext {
         memory_backend: None,
         web_search_config: Default::default(),
         web_fetch_config: Default::default(),
-        lsp: None,
+        lsp,
         image_gen_config: Default::default(),
         video_gen_config: Default::default(),
         app_builder_deployer_config: Default::default(),
@@ -239,6 +242,163 @@ fn session_context(cwd: PathBuf) -> SessionContext {
         attribution_callback: None,
         system_reminder_tag: DEFAULT_REMINDER_TAG,
     }
+}
+
+fn build_lsp_backend(
+    cwd: &Path,
+    notification_handle: ToolNotificationHandle,
+) -> Option<Arc<dyn LspBackend>> {
+    let mut servers = load_servers(cwd);
+    add_auto_detected_lsp_servers(cwd, &mut servers);
+    if servers.is_empty() {
+        return None;
+    }
+    let manager = LspManager::new(
+        servers,
+        cwd.to_path_buf(),
+        true,
+        notification_handle,
+    );
+    Some(Arc::new(LspBackendAdapter::new(Arc::new(
+        tokio::sync::Mutex::new(manager),
+    ))))
+}
+
+fn add_auto_detected_lsp_servers(cwd: &Path, servers: &mut BTreeMap<String, LspServerConfig>) {
+    let claimed = |ext: &str, servers: &BTreeMap<String, LspServerConfig>| {
+        servers.values().any(|cfg| cfg.extensions.contains_key(ext))
+    };
+
+    if !claimed(".ts", servers)
+        && let Some((command, mut args)) = find_language_server(cwd, "typescript-language-server")
+    {
+        args.push("--stdio".into());
+        servers.insert(
+            "typescript".into(),
+            LspServerConfig {
+                command,
+                args,
+                extensions: HashMap::from([
+                    (".ts".into(), "typescript".into()),
+                    (".tsx".into(), "typescriptreact".into()),
+                    (".mts".into(), "typescript".into()),
+                    (".cts".into(), "typescript".into()),
+                    (".js".into(), "javascript".into()),
+                    (".jsx".into(), "javascriptreact".into()),
+                ]),
+                restart_on_crash: Some(true),
+                ..Default::default()
+            },
+        );
+    }
+
+    if !claimed(".rs", servers)
+        && let Some((command, args)) = find_language_server(cwd, "rust-analyzer")
+    {
+        servers.insert(
+            "rust".into(),
+            LspServerConfig {
+                command,
+                args,
+                extensions: HashMap::from([(".rs".into(), "rust".into())]),
+                restart_on_crash: Some(true),
+                ..Default::default()
+            },
+        );
+    }
+
+    if !claimed(".py", servers)
+        && let Some((command, mut args)) = find_language_server(cwd, "pyright-langserver")
+    {
+        args.push("--stdio".into());
+        servers.insert(
+            "python".into(),
+            LspServerConfig {
+                command,
+                args,
+                extensions: HashMap::from([(".py".into(), "python".into())]),
+                restart_on_crash: Some(true),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+fn find_language_server(cwd: &Path, name: &str) -> Option<(String, Vec<String>)> {
+    // Rustup proxies can be shadowed by repo-specific shims on PATH. Resolve
+    // the actual component first so Hands does not accidentally start a broken
+    // rust-analyzer from another workspace.
+    if name == "rust-analyzer"
+        && let Ok(output) = Command::new("rustup").args(["which", "rust-analyzer"]).output()
+        && output.status.success()
+    {
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        if path.is_file() {
+            return Some((path.display().to_string(), Vec::new()));
+        }
+    }
+
+    let local_bin = cwd.join("node_modules").join(".bin");
+    #[cfg(windows)]
+    for ext in ["cmd", "exe", "bat"] {
+        let candidate = local_bin.join(format!("{name}.{ext}"));
+        if candidate.is_file() {
+            return Some(command_for_path(candidate));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let candidate = local_bin.join(name);
+        if candidate.is_file() {
+            return Some((candidate.display().to_string(), Vec::new()));
+        }
+    }
+
+    #[cfg(windows)]
+    if let Ok(output) = Command::new("npm.cmd").args(["prefix", "-g"]).output()
+        && output.status.success()
+    {
+        let prefix = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        for ext in ["cmd", "exe", "bat"] {
+            let candidate = prefix.join(format!("{name}.{ext}"));
+            if candidate.is_file() {
+                return Some(command_for_path(candidate));
+            }
+        }
+    }
+
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(command_for_path(candidate));
+        }
+        #[cfg(windows)]
+        for ext in ["exe", "cmd", "bat"] {
+            let candidate = dir.join(format!("{name}.{ext}"));
+            if candidate.is_file() {
+                return Some(command_for_path(candidate));
+            }
+        }
+    }
+    None
+}
+
+fn command_for_path(path: PathBuf) -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        let is_script = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+        if is_script {
+            return (
+                "cmd.exe".into(),
+                vec!["/d".into(), "/s".into(), "/c".into(), path.display().to_string()],
+            );
+        }
+    }
+    (path.display().to_string(), Vec::new())
 }
 
 pub async fn build_bridge(cwd: PathBuf) -> Result<ToolBridge, String> {

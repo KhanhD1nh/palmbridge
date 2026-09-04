@@ -263,9 +263,16 @@ fn write_profile(key: &Path, harness: &Path, tunnel_id: &str) -> Result<(), Stri
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let key_path = key.display().to_string();
-    let sock = host::mcp_socket().display().to_string();
+    let mut key_path = key.display().to_string();
+    let mut sock = host::mcp_socket().display().to_string();
     let _harness = harness.display().to_string();
+    // YAML double-quoted scalars treat backslashes as escapes ("\U" → unicode).
+    // Windows paths must use forward slashes (accepted by Go and Command::new).
+    #[cfg(windows)]
+    {
+        key_path = key_path.replace('\\', "/");
+        sock = sock.replace('\\', "/");
+    }
     let yaml = format!(
         r#"config_version: 1
 control_plane:
@@ -296,6 +303,10 @@ mcp:
 }
 
 fn wrapper_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        return host::config_dir().join("run-tunnel.cmd");
+    }
     host::config_dir().join("run-tunnel.sh")
 }
 
@@ -305,9 +316,18 @@ fn write_wrapper(client: &Path) -> Result<(), String> {
     let path = wrapper_path();
     let sock = host::mcp_socket();
     let client = client.display();
-    // Long-poll is the wait-for-request. MCP is HTTP-over-UDS, not stdio.
-    let body = format!(
-        r#"#!/bin/sh
+    #[cfg(windows)]
+    {
+        let body = format!(
+            "@echo off\r\n\"{client}\" run --profile {PROFILE} --log.level=warn --control-plane.poll-timeout=60s\r\n"
+        );
+        fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    #[cfg(not(windows))]
+    {
+        // Long-poll is the wait-for-request. MCP is HTTP-over-UDS, not stdio.
+        let body = format!(
+            r#"#!/bin/sh
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 CLIENT="{client}"
 SOCK="{}"
@@ -328,13 +348,14 @@ if command -v systemd-inhibit >/dev/null 2>&1; then
 fi
 exec "$@"
 "#,
-        sock.display()
-    );
-    fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+            sock.display()
+        );
+        fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+        }
     }
     Ok(())
 }
@@ -359,17 +380,33 @@ pub fn tunnel_client_bin() -> Result<PathBuf, String> {
 fn which(name: &str) -> Option<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(path) = std::env::var("PATH") {
-        dirs.extend(path.split(':').map(PathBuf::from));
+        #[cfg(windows)]
+        let sep = ';';
+        #[cfg(not(windows))]
+        let sep = ':';
+        dirs.extend(path.split(sep).filter(|s| !s.is_empty()).map(PathBuf::from));
     }
     if let Some(home) = dirs::home_dir() {
         dirs.push(home.join(".local/bin"));
     }
-    dirs.push(PathBuf::from("/opt/homebrew/bin"));
-    dirs.push(PathBuf::from("/usr/local/bin"));
+    #[cfg(windows)]
+    dirs.push(PathBuf::from("C:\\Program Files\\OpenAI"));
+    #[cfg(not(windows))]
+    {
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+    }
     for dir in dirs {
         let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            let exe = candidate.with_extension("exe");
+            if exe.is_file() {
+                return Some(exe);
+            }
         }
     }
     None
@@ -410,7 +447,12 @@ pub fn installed() -> bool {
     unit_path().is_file()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+pub fn installed() -> bool {
+    profile_file().is_file()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub fn installed() -> bool {
     false
 }
@@ -806,27 +848,96 @@ fn uninstall_supervisor() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn install_supervisor() -> Result<(), String> {
+    stop_unmanaged();
+    start_supervisor()
+}
+
+#[cfg(windows)]
+fn start_supervisor() -> Result<(), String> {
+    spawn_tunnel()?;
+    if wait_ready(Duration::from_secs(15)) {
+        Ok(())
+    } else {
+        Err("tunnel did not become ready".into())
+    }
+}
+
+#[cfg(windows)]
+fn stop_supervisor() -> Result<(), String> {
+    let pid_file = host::config_dir().join("hands-tunnel.pid");
+    if let Ok(pid) = fs::read_to_string(&pid_file) {
+        let pid = pid.trim();
+        if !pid.is_empty() {
+    let _ = Command::new("taskkill")
+        .args(["/PID", pid, "/T", "/F"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+            let _ = fs::remove_file(&pid_file);
+        }
+    }
+    let _ = Command::new("taskkill")
+        .args(["/IM", "tunnel-client.exe", "/F"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    std::thread::sleep(Duration::from_millis(300));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn uninstall_supervisor() -> Result<(), String> {
+    stop_supervisor()
+}
+
+// Windows: no KeepAlive supervisor (no LaunchAgent/systemd); `hands setup`
+// starts the tunnel in a detached background process. Reboot or crash means
+// `hands start` again — manual restart, matching the test scope.
+#[cfg(windows)]
+fn spawn_tunnel() -> Result<(), String> {
+    let wrapper = wrapper_path();
+    if !wrapper.is_file() {
+        return Err(format!("wrapper missing: {}", wrapper.display()));
+    }
+    let pid_file = host::config_dir().join("hands-tunnel.pid");
+    let ps = format!(
+        "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','{w}' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath '{pf}' -Value $p.Id",
+        w = wrapper.display(),
+        pf = pid_file.display(),
+    );
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &ps])
+        .output()
+        .map_err(|e| format!("powershell: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn install_supervisor() -> Result<(), String> {
     Err("auto-start is implemented for macOS and Linux".into())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn start_supervisor() -> Result<(), String> {
     Err("auto-start is implemented for macOS and Linux".into())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn stop_supervisor() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn uninstall_supervisor() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn install_watch() -> Result<(), String> {
     Ok(())
 }
@@ -841,6 +952,22 @@ fn uninstall_mcp() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn install_watch() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn stop_unmanaged() {
+    let _ = Command::new("taskkill")
+        .args(["/IM", "tunnel-client.exe", "/F"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+#[cfg(not(windows))]
 fn stop_unmanaged() {
     let Ok(out) = Command::new("ps").args(["-axo", "pid=,command="]).output() else {
         return;
@@ -862,7 +989,6 @@ fn stop_unmanaged() {
     }
     std::thread::sleep(Duration::from_millis(300));
 }
-
 #[cfg(target_os = "macos")]
 fn launchctl(args: &[&str]) -> std::process::Output {
     Command::new("launchctl")

@@ -67,6 +67,8 @@ ChatGPT, not Hands, shows Confirm. MCP cannot turn that off.
 | `grep` | search contents |
 | `list_dir` | tree |
 | `glob` | find files by name |
+| `lsp` | code intelligence via language servers (definitions, references, symbols, hover) |
+| `browser` | inspect localhost Chromium DOM/computed styles, run JS, capture screenshots |
 | `search_replace` | edit existing |
 | `write` | create / overwrite |
 | `apply_patch` | multi-hunk patch |
@@ -76,6 +78,12 @@ ChatGPT, not Hands, shows Confirm. MCP cannot turn that off.
 | `kill_task` | stop background job |
 
 Debug: `hands list`, `hands call read_file '{"target_file":"README.md"}'`.
+
+`glob` is implemented natively by Hands on Windows, so it does not require `rg` to be on PATH.
+LSP auto-detects project/user `.grok/lsp.json`, local `node_modules/.bin`, npm global language servers,
+and `rustup which rust-analyzer`. Browser inspection supports Chrome, Brave, Edge, or Chromium and is
+intended for local development/debugging; `browser start` creates a persistent Hands browser profile
+that can be signed into once and reused for authenticated localhost apps.
 
 On AC the Mac stays awake for the long-poll; on battery, closing the lid may sleep.
 

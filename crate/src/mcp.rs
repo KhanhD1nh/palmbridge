@@ -22,6 +22,7 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "Hands";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+
 pub struct McpHost {
     fallback_cwd: PathBuf,
     cached: Mutex<Option<(PathBuf, ToolBridge)>>,
@@ -35,6 +36,32 @@ impl McpHost {
             cached: Mutex::new(None),
             call_seq: AtomicU64::new(1),
         })
+    }
+
+    pub async fn debug_list(&self) -> Result<Value, String> {
+        self.tools_list()
+            .await
+            .map_err(|(_, message, _)| message)
+    }
+
+    pub async fn debug_call(&self, name: &str, arguments: Value) -> Result<String, String> {
+        let result = self
+            .tools_call(json!({ "name": name, "arguments": arguments }))
+            .await
+            .map_err(|(_, message, _)| message)?;
+        let text = result
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
+            Err(text)
+        } else {
+            Ok(text)
+        }
     }
 
     fn workspace(&self) -> PathBuf {
@@ -261,6 +288,7 @@ impl McpHost {
             let description = d.function.description.unwrap_or_default();
             plugin::tool_descriptor(&name, &description, d.function.parameters)
         }));
+        tools.push(crate::browser::tool_definition());
         Ok(json!({ "tools": tools }))
     }
 
@@ -296,6 +324,32 @@ impl McpHost {
             };
         }
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+        if name == "glob" {
+            let cwd = self.workspace();
+            return match crate::native_glob::run(&arguments, &cwd) {
+                Ok(text) => Ok(json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "isError": false
+                })),
+                Err(error) => Ok(json!({
+                    "content": [{ "type": "text", "text": error }],
+                    "isError": true
+                })),
+            };
+        }
+        if name == "browser" {
+            let cwd = self.workspace();
+            return match crate::browser::run(&arguments, &cwd).await {
+                Ok(text) => Ok(json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "isError": false
+                })),
+                Err(error) => Ok(json!({
+                    "content": [{ "type": "text", "text": error }],
+                    "isError": true
+                })),
+            };
+        }
         let call_id = format!(
             "mcp-{}",
             self.call_seq.fetch_add(1, Ordering::Relaxed)

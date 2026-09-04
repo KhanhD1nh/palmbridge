@@ -1,0 +1,60 @@
+diff --git a/crates/build/xai-proto-build/src/lib.rs b/crates/build/xai-proto-build/src/lib.rs
+index 9404ea4..a51dccd 100644
+--- a/crates/build/xai-proto-build/src/lib.rs
++++ b/crates/build/xai-proto-build/src/lib.rs
+@@ -144,9 +144,24 @@ impl XaiProtoBuilder {
+         // Can only process one input file when using --dependency_out=FILE.
+         for proto in protos {
+             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
+-            command
+-                .arg("--dependency_out=/dev/stdout")
+-                .arg("--descriptor_set_out=/dev/null");
++            // /dev/stdout and /dev/null do not exist on Windows: protoc writes
++            // the dependency file to a real path and NUL discards descriptors.
++            #[cfg(windows)]
++            let dep_path = {
++                let mut p = std::env::temp_dir();
++                let fname = proto.file_name().and_then(|s| s.to_str()).unwrap_or("proto");
++                p.push(format!("xai-proto-deps-{}-{fname}.d", std::process::id()));
++                p
++            };
++            #[cfg(windows)]
++            let dep_flag = format!("--dependency_out={}", dep_path.display());
++            #[cfg(not(windows))]
++            let dep_flag = "--dependency_out=/dev/stdout".to_string();
++            #[cfg(windows)]
++            let desc_out = "--descriptor_set_out=NUL";
++            #[cfg(not(windows))]
++            let desc_out = "--descriptor_set_out=/dev/null";
++            command.arg(&dep_flag).arg(desc_out);
+ 
+             // Add protoc's well-known types include directory first (if found).
+             // This is needed for Bazel sandboxed builds where protoc and its
+@@ -172,11 +187,17 @@ impl XaiProtoBuilder {
+                 return Err(anyhow::anyhow!("protoc command failed"));
+             }
+ 
++            #[cfg(windows)]
++            let output = std::fs::read_to_string(&dep_path)
++                .context("read protoc dependency output")?;
++            #[cfg(not(windows))]
+             let output =
+                 String::from_utf8(output.stdout).context("protoc command output not UTF-8")?;
+-
+             let mut lines = output.lines();
+             let first_line = lines.next().context("protoc command output is empty")?;
++            #[cfg(windows)]
++            let prefix = "NUL:";
++            #[cfg(not(windows))]
+             let prefix = "/dev/null:";
+             let rem = first_line.strip_prefix(prefix).with_context(|| {
+                 format!("protoc command output must start with /dev/null: {output:?}")
+@@ -197,6 +218,8 @@ impl XaiProtoBuilder {
+ 
+                 println!("cargo:rerun-if-changed={line}");
+             }
++            #[cfg(windows)]
++            let _ = std::fs::remove_file(&dep_path);
+         }
+ 
+         Ok(())

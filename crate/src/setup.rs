@@ -89,11 +89,15 @@ fn read_line() -> Result<Option<String>, String> {
 }
 
 fn read_secret() -> Result<Option<String>, String> {
+    #[cfg(not(windows))]
     let _ = Command::new("stty").arg("-echo").status();
     let mut s = String::new();
     let r = io::stdin().lock().read_line(&mut s);
-    let _ = Command::new("stty").arg("echo").status();
-    eprintln!();
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("stty").arg("echo").status();
+        eprintln!();
+    }
     r.map_err(|e| e.to_string())?;
     let t = s.trim().to_string();
     Ok(if t.is_empty() { None } else { Some(t) })
@@ -116,6 +120,8 @@ fn copy_clip(text: &str) {
     };
     if cfg!(target_os = "macos") {
         let _ = try_copy("pbcopy", &[]);
+    } else if cfg!(target_os = "windows") {
+        let _ = try_copy("clip.exe", &[]);
     } else {
         let _ = try_copy("wl-copy", &[]) || try_copy("xclip", &["-selection", "clipboard"]);
     }

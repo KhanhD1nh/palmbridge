@@ -1,8 +1,10 @@
 //! Hands — unofficial ChatGPT plugin. Local coding tools. No model.
 
 mod host;
+mod browser;
 mod mcp;
 mod plugin;
+mod native_glob;
 mod secrets;
 mod service;
 mod setup;
@@ -197,24 +199,12 @@ async fn run(fallback: PathBuf, cmd: Cmd) -> Result<(), String> {
         Cmd::McpStdio => mcp::McpHost::new(fallback).serve_stdio().await,
         Cmd::McpHttp { addr } => mcp::McpHost::new(fallback).serve_http(addr).await,
         Cmd::List | Cmd::Call { .. } => {
-            let cwd = host::resolve_workspace(&fallback);
-            let bridge = host::build_bridge(cwd).await?;
+            let mcp = mcp::McpHost::new(fallback);
             match cmd {
                 Cmd::List => {
-                    let defs = bridge.tool_definitions().await;
-                    let tools: Vec<serde_json::Value> = defs
-                        .into_iter()
-                        .map(|d| {
-                            serde_json::json!({
-                                "name": d.function.name,
-                                "description": d.function.description,
-                                "parameters": d.function.parameters,
-                            })
-                        })
-                        .collect();
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({ "tools": tools }))
+                        serde_json::to_string_pretty(&mcp.debug_list().await?)
                             .map_err(|e| e.to_string())?
                     );
                     Ok(())
@@ -222,11 +212,7 @@ async fn run(fallback: PathBuf, cmd: Cmd) -> Result<(), String> {
                 Cmd::Call { tool, args_json } => {
                     let params: serde_json::Value = serde_json::from_str(&args_json)
                         .map_err(|e| format!("invalid json args: {e}"))?;
-                    let result = bridge
-                        .call(&tool, params, "hands-1")
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    println!("{}", result.prompt_text);
+                    println!("{}", mcp.debug_call(&tool, params).await?);
                     Ok(())
                 }
                 _ => unreachable!(),

@@ -8,6 +8,70 @@ ChatGPT Web → OpenAI tunnel → Palmbridge → selected repository
 
 Fork of [nghyane/hands](https://github.com/nghyane/hands). Not affiliated with OpenAI or xAI. Tool runtime: [Grok Build](https://github.com/xai-org/grok-build), Apache-2.0.
 
+## How it works
+
+1. `hands setup` pins the current directory as the active workspace, stores the tunnel credentials, writes a `tunnel-client` profile, and starts the local services.
+2. On macOS and Linux, `hands --http` starts an MCP server on `127.0.0.1:8787` and a private Unix socket for `tunnel-client`. Windows uses the installed tunnel-client profile and its detached tunnel process.
+3. `tunnel-client` authenticates to OpenAI using the restricted runtime key and binds the selected `tunnel_...` ID to that local MCP server.
+4. ChatGPT's Tunnel connection sends MCP requests through that existing tunnel. Palmbridge executes the requested tool against the pinned workspace and returns the result through the same path.
+
+```mermaid
+sequenceDiagram
+    participant C as ChatGPT Web
+    participant T as OpenAI tunnel
+    participant TC as tunnel-client
+    participant P as Palmbridge
+    participant R as Selected repository
+    C->>T: MCP tool request
+    T->>TC: authenticated tunnel request
+    TC->>P: local MCP request
+    P->>R: read, edit, search, or command
+    R-->>P: result
+    P-->>TC: MCP response
+    TC-->>T: tunnel response
+    T-->>C: tool result
+```
+
+### Local processes and persistence
+
+| Component | Role | Where it listens or persists |
+|---|---|---|
+| `hands --http` | MCP HTTP server and local configuration UI | `127.0.0.1:8787` |
+| `tunnel-client` | Authenticated outbound connection to OpenAI | OpenAI control plane; health endpoint `127.0.0.1:18780` when running |
+| Workspace pin | Defines the default repository for tools | `~/.config/hands/workspace` on Unix; `%APPDATA%\hands\workspace` on Windows |
+| Tunnel profile | Maps `tunnel-client` to Palmbridge | `~/.config/tunnel-client/hands.yaml` |
+| Runtime key file | Read by `tunnel-client`, never sent through MCP | Palmbridge config directory, `0600` on Unix |
+
+`hands config --open` serves only on loopback. It is a local control page, not a public dashboard.
+
+### Workspace and access boundary
+
+Palmbridge pins one workspace, not a sandbox. File tools operate relative to that workspace, but `run_terminal_cmd` runs commands on the host with your user permissions. ChatGPT can change the pin through `set_workspace`; treat access to the ChatGPT connection as access to the local account within ChatGPT's approval policy.
+
+Use a separate OS account or a dedicated working directory when the machine contains repositories or files ChatGPT must not access. Never put keys, tokens, or private data into prompts or committed files.
+
+### Credentials and network
+
+- The runtime key authenticates `tunnel-client` to OpenAI. Restrict it to **Tunnels: Read** and **Tunnels: Use**.
+- The `tunnel_...` ID identifies the tunnel; it is not a replacement for the runtime key.
+- MCP tool traffic uses the outbound tunnel. No inbound port-forwarding or public local listener is configured by Palmbridge.
+- On macOS, the key is also saved in Keychain when interactive setup succeeds. On Linux/Windows, Palmbridge uses `secret-tool` when available. Every platform retains a local key file because `tunnel-client` requires a file-backed profile.
+- `hands status --json` reports local process health; it does not prove ChatGPT authorization or a particular tool's permission.
+
+### Lifecycle by platform
+
+| Platform | MCP and tunnel lifecycle | Sleep/restart behavior |
+|---|---|---|
+| macOS | LaunchAgents start and keep services alive after login | AC power prevents idle sleep while tunnel waits; lid close on battery may suspend it |
+| Linux | systemd user services start and restart services | Host/user session policy controls sleep and login behavior |
+| Windows | Detached `tunnel-client` process started by `hands setup` or `hands start` | No persistent supervisor; run `hands start` after reboot or a crash |
+
+## Security model
+
+Palmbridge does not contain a model or independently decide actions. ChatGPT chooses tools; the MCP tool annotations tell ChatGPT which operations are read-only or destructive. ChatGPT may still require confirmation based on its own policy. Treat **Never ask** as granting the connected ChatGPT app broad authority to operate with the local user account.
+
+Audit before granting broad approval. Keep the tunnel key restricted. Stop the service with `hands stop` when remote access is not needed.
+
 ## Requirements
 
 | Platform | Required |

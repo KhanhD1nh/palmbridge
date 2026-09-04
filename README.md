@@ -141,6 +141,18 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Install `tunnel-client` separately for your distribution before running setup.
 
+## Uninstall
+
+Uninstall removes Palmbridge binaries and managed services. It keeps credentials and the build cache.
+
+```bash
+./uninstall.sh
+```
+
+```powershell
+.\uninstall.ps1
+```
+
 ## Connect ChatGPT
 
 ### 1. Create credentials

@@ -12,6 +12,58 @@ OLD_MEMBER = '    "crates/codegen/grok-harness",'
 LEGACY_MEMBER = '    "crates/codegen/hands",'
 
 
+def quiet_upstream_warnings(grok_build: Path) -> None:
+    """Apply text fixes for known warnings in vendored upstream crates.
+
+    Each fix is idempotent and skipped silently if upstream changes shape.
+    """
+    codegen = grok_build / "crates" / "codegen"
+    file_fixes = {
+        codegen
+        / "xai-grok-tools"
+        / "src"
+        / "computer"
+        / "local"
+        / "terminal.rs": [
+            (
+                "async fn collect_shell_state_dumps(&mut self, task_ids: &[String])",
+                "async fn collect_shell_state_dumps(&mut self, _task_ids: &[String])",
+            ),
+            (
+                "let mut build_cmd = |with_breakaway: bool| {",
+                "let build_cmd = |with_breakaway: bool| {",
+            ),
+            (
+                "    login_shell_capture: bool,\n",
+                "    #[allow(dead_code)]\n    login_shell_capture: bool,\n",
+            ),
+        ],
+        codegen / "xai-tty-utils" / "src" / "lib.rs": [
+            (
+                "use std::os::windows::io::{AsRawHandle, FromRawHandle};",
+                "use std::os::windows::io::FromRawHandle;",
+            ),
+        ],
+        codegen / "xai-grok-config" / "src" / "managed_text" / "source.rs": [
+            (
+                "pub(super) struct ParentAnchor {\n    path: PathBuf,\n    identity: FileIdentity,\n    directory: fs::File,\n}",
+                "pub(super) struct ParentAnchor {\n    path: PathBuf,\n    identity: FileIdentity,\n    #[allow(dead_code)]\n    directory: fs::File,\n}",
+            ),
+        ],
+    }
+    for path, fixes in file_fixes.items():
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        changed = False
+        for old, new in fixes:
+            if old in text:
+                text = text.replace(old, new, 1)
+                changed = True
+        if changed:
+            path.write_text(text, encoding="utf-8")
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print("usage: inject.py <palmbridge-repo> <grok-build-checkout>", file=sys.stderr)
@@ -33,23 +85,10 @@ def main() -> int:
         shutil.rmtree(dest)
     shutil.copytree(crate_src, dest)
 
+    # Silence known upstream warnings in xai-grok-tools (fixed upstream pending).
+    quiet_upstream_warnings(grok_build)
+
     root = grok_build / "Cargo.toml"
-    text = root.read_text()
-    if OLD_MEMBER in text:
-        text = text.replace(OLD_MEMBER, MEMBER, 1)
-        root.write_text(text)
-    elif LEGACY_MEMBER in text:
-        text = text.replace(LEGACY_MEMBER, MEMBER, 1)
-        root.write_text(text)
-    elif MEMBER.strip() not in text:
-        needle = '    "crates/codegen/xai-grok-tools",'
-        if needle not in text:
-            print("could not find xai-grok-tools member in grok-build Cargo.toml", file=sys.stderr)
-            return 1
-        text = text.replace(needle, needle + "\n" + MEMBER, 1)
-        root.write_text(text)
-    print(f"injected {dest}")
-    return 0
 
 
 if __name__ == "__main__":

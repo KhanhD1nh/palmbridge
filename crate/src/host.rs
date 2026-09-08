@@ -29,21 +29,19 @@ fn home_dir() -> PathBuf {
 /// XDG on Unix (`~/.config/palmbridge`). `%APPDATA%\palmbridge` on Windows.
 pub fn config_dir() -> PathBuf {
     #[cfg(windows)]
-    {
-        return dirs::config_dir()
-            .unwrap_or_else(|| home_dir().join("AppData/Roaming"))
-            .join(APP);
-    }
+    return dirs::config_dir()
+        .unwrap_or_else(|| home_dir().join("AppData/Roaming"))
+        .join(APP);
+    #[cfg(not(windows))]
     home_dir().join(".config").join(APP)
 }
 
 pub fn tunnel_client_dir() -> PathBuf {
     #[cfg(windows)]
-    {
-        return dirs::config_dir()
-            .unwrap_or_else(|| home_dir().join("AppData/Roaming"))
-            .join("tunnel-client");
-    }
+    return dirs::config_dir()
+        .unwrap_or_else(|| home_dir().join("AppData/Roaming"))
+        .join("tunnel-client");
+    #[cfg(not(windows))]
     home_dir().join(".config/tunnel-client")
 }
 
@@ -51,6 +49,7 @@ pub fn workspace_file() -> PathBuf {
     config_dir().join("workspace")
 }
 
+#[cfg(not(windows))]
 pub fn mcp_socket() -> PathBuf {
     config_dir().join("mcp.sock")
 }

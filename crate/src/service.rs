@@ -16,14 +16,15 @@ use crate::host;
 
 pub const HEALTH_LISTEN: &str = "127.0.0.1:18780";
 pub const HEALTH_BASE: &str = "http://127.0.0.1:18780";
-pub const MCP_LISTEN: &str = "127.0.0.1:8787";
 pub const MCP_BASE: &str = "http://127.0.0.1:8787";
 pub const PROFILE: &str = "palmbridge";
+#[cfg(target_os = "macos")]
 const LABEL: &str = "dev.palmbridge.tunnel";
 #[cfg(target_os = "macos")]
 const MCP_LABEL: &str = "dev.palmbridge.mcp";
 #[cfg(target_os = "macos")]
 const WATCH_LABEL: &str = "dev.palmbridge.watch";
+#[cfg(target_os = "macos")]
 const LEGACY_LABELS: &[&str] = &["dev.hands.tunnel", "ai.grok.harness.tunnel"];
 const LEGACY_PROFILES: &[&str] = &["hands", "grok-harness"];
 
@@ -316,10 +317,10 @@ mcp:
 
 fn wrapper_path() -> PathBuf {
     #[cfg(windows)]
-    {
-        return host::config_dir().join("run-tunnel.cmd");
-    }
-    host::config_dir().join("run-tunnel.sh")
+    let path = host::config_dir().join("run-tunnel.cmd");
+    #[cfg(not(windows))]
+    let path = host::config_dir().join("run-tunnel.sh");
+    path
 }
 
 fn write_wrapper(client: &Path) -> Result<(), String> {
@@ -425,6 +426,7 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
+#[cfg(target_os = "macos")]
 fn log_dir() -> PathBuf {
     host::config_dir().join("logs")
 }
@@ -1203,6 +1205,7 @@ fn run_ok(bin: &str, args: &[&str]) -> Result<(), String> {
 fn systemd_exec_path(path: &Path) -> String {
     format!("\"{}\"", path.display().to_string().replace('\\', "\\\\").replace('"', "\\\""))
 }
+#[cfg(target_os = "macos")]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

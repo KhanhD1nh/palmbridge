@@ -74,17 +74,49 @@ Audit before granting broad approval. Keep the tunnel key restricted. Stop the s
 
 ## Requirements
 
-| Platform | Required |
-|---|---|
-| macOS | Xcode Command Line Tools, Homebrew, `git`, `python3`, Rust, `tunnel-client` |
-| Windows 10/11 | Git, Python 3 launcher (`py`), Rust MSVC toolchain, Visual Studio Build Tools C++, `protoc.exe` on `PATH` |
-| Linux | `git`, `python3`, Rust, `tunnel-client`, systemd user services |
+Prebuilt binaries require no build tools. Building from source requires:
 
-The first install clones and compiles Grok Build. It can take several minutes.
+| Platform | Required for source build |
+|---|---|
+| macOS | Xcode Command Line Tools, Homebrew, `git`, `python3`, Rust |
+| Windows 10/11 | Git, Python 3, Rust MSVC toolchain, Visual Studio Build Tools C++, `protoc.exe` |
+| Linux | `git`, `python3`, Rust, systemd user services |
 
 ## Install
 
-### macOS
+### Prebuilt (recommended)
+
+Download the latest release binary and add it to PATH. No Rust, Git, or build tools needed.
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/KhanhD1nh/palmbridge/main/install-prebuilt.ps1 | iex
+```
+
+**macOS / Linux**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KhanhD1nh/palmbridge/main/install-prebuilt.sh | bash
+```
+
+To install a specific version instead of latest:
+
+```powershell
+# Windows
+.\install-prebuilt.ps1 -Version v0.2.0
+```
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/KhanhD1nh/palmbridge/main/install-prebuilt.sh | bash -s v0.2.0
+```
+
+Binaries are installed to `~/.local/bin` (Unix) or `%USERPROFILE%\.local\bin` (Windows). The scripts add the directory to your PATH automatically.
+
+### From source
+
+#### macOS
 
 ```bash
 xcode-select --install
@@ -104,7 +136,7 @@ source ~/.zshrc
 palmbridge --version
 ```
 
-### Windows
+#### Windows
 
 Install prerequisites first:
 
@@ -130,7 +162,7 @@ palmbridge --version
 
 Persist it through Windows Environment Variables if required for new terminals.
 
-### Linux
+#### Linux
 
 ```bash
 git clone https://github.com/KhanhD1nh/palmbridge.git
@@ -140,7 +172,6 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Install `tunnel-client` separately for your distribution before running setup.
-
 ## Uninstall
 
 Uninstall removes Palmbridge binaries and managed services. It keeps credentials and the build cache.

@@ -955,8 +955,8 @@ fn spawn_tunnel_process() -> Result<u32, String> {
             "--control-plane.poll-timeout=60s",
         ])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(log_file("tunnel-client.out.log"))
+        .stderr(log_file("tunnel-client.err.log"))
         .spawn()
         .map_err(|e| format!("start tunnel-client: {e}"))?;
     let id = child.id();
@@ -979,6 +979,40 @@ fn wait_port_free(port: u16, timeout: Duration) {
             return; // Port is free.
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Open an append-mode log file under config_dir/logs for child process output.
+#[cfg(windows)]
+fn log_file(name: &str) -> Stdio {
+    let dir = host::config_dir().join("logs");
+    let _ = fs::create_dir_all(&dir);
+    match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(name))
+    {
+        Ok(file) => Stdio::from(file),
+        Err(_) => Stdio::null(),
+    }
+}
+
+/// Append a timestamped line to the watchdog event log.
+#[cfg(windows)]
+fn watchdog_log(msg: &str) {
+    let dir = host::config_dir().join("logs");
+    let _ = fs::create_dir_all(&dir);
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("watchdog.log"))
+    {
+        use std::io::Write;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(file, "{ts} {msg}");
     }
 }
 
@@ -1011,22 +1045,27 @@ fn process_alive(pid: u32) -> bool {
 #[cfg(windows)]
 fn tunnel_watchdog(mut current_pid: u32) {
     let pid_file = host::config_dir().join("palmbridge-tunnel.pid");
+    watchdog_log("tunnel watchdog started");
     loop {
         std::thread::sleep(Duration::from_secs(15));
         // If PID file was removed, stop was requested — exit watchdog.
         if !pid_file.exists() {
+            watchdog_log("pid file removed, tunnel watchdog exiting");
             WATCHDOG_RUNNING.store(false, Ordering::SeqCst);
             return;
         }
         if process_alive(current_pid) {
             continue;
         }
+        watchdog_log(&format!("tunnel-client {current_pid} died"));
         match spawn_tunnel_process() {
             Ok(new_pid) => {
+                watchdog_log(&format!("tunnel-client restarted as {new_pid}"));
                 eprintln!("[watchdog] tunnel-client {current_pid} died, restarted as {new_pid}");
                 current_pid = new_pid;
             }
             Err(e) => {
+                watchdog_log(&format!("failed to restart tunnel-client: {e}"));
                 eprintln!("[watchdog] failed to restart tunnel-client: {e}");
             }
         }
@@ -1074,8 +1113,8 @@ fn install_mcp() -> Result<(), String> {
     let child = Command::new(harness_bin()?)
         .args(["--http", "--port", "8787"])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(log_file("mcp.out.log"))
+        .stderr(log_file("mcp.err.log"))
         .spawn()
         .map_err(|e| format!("start MCP HTTP: {e}"))?;
     fs::create_dir_all(host::config_dir()).map_err(|e| format!("mkdir config: {e}"))?;
@@ -1103,10 +1142,12 @@ fn uninstall_mcp() -> Result<(), String> {
 /// Background loop: restart MCP HTTP process if it dies while tunnel is up.
 #[cfg(windows)]
 fn mcp_watchdog() {
+    watchdog_log("mcp watchdog started");
     let pid_file = host::config_dir().join("palmbridge-mcp.pid");
     loop {
         std::thread::sleep(Duration::from_secs(15));
         if !pid_file.exists() {
+            watchdog_log("mcp pid file removed, mcp watchdog exiting");
             return; // uninstalled
         }
         let pid = match fs::read_to_string(&pid_file) {
@@ -1119,18 +1160,24 @@ fn mcp_watchdog() {
         if process_alive(pid) {
             continue;
         }
+        watchdog_log(&format!("MCP HTTP {pid} died"));
         // MCP died. Respawn.
         if let Ok(bin) = harness_bin() {
             if let Ok(child) = Command::new(bin)
                 .args(["--http", "--port", "8787"])
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(log_file("mcp.out.log"))
+                .stderr(log_file("mcp.err.log"))
                 .spawn()
             {
                 let _ = fs::write(&pid_file, child.id().to_string());
+                watchdog_log(&format!("MCP HTTP restarted as {}", child.id()));
                 eprintln!("[watchdog] MCP HTTP {pid} died, restarted as {}", child.id());
+            } else {
+                watchdog_log("failed to restart MCP HTTP");
             }
+        } else {
+            watchdog_log("harness binary missing, cannot restart MCP HTTP");
         }
     }
 }

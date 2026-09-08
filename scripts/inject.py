@@ -27,7 +27,7 @@ def quiet_upstream_warnings(grok_build: Path) -> None:
         / "terminal.rs": [
             (
                 "async fn collect_shell_state_dumps(&mut self, task_ids: &[String])",
-                "async fn collect_shell_state_dumps(&mut self, _task_ids: &[String])",
+                "#[allow(unused_variables)]\n    async fn collect_shell_state_dumps(&mut self, task_ids: &[String])",
             ),
             (
                 "let mut build_cmd = |with_breakaway: bool| {",

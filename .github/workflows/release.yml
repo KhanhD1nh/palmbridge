@@ -81,7 +81,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item .grok-build\target\release\palmbridge.exe "dist\${{ matrix.asset }}" -Force
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: dist
       - name: Flatten

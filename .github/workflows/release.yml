@@ -17,6 +17,8 @@ jobs:
             asset: palmbridge-macos-aarch64
           - os: ubuntu-24.04
             asset: palmbridge-linux-x86_64
+          - os: windows-latest
+            asset: palmbridge-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -35,18 +37,49 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf
 
-      - name: Inject crate
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Inject crate (Unix)
+        if: runner.os != 'Windows'
         run: python3 scripts/inject.py "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.grok-build"
 
-      - name: Build
+      - name: Inject crate (Windows)
+        if: runner.os == 'Windows'
+        run: python scripts/inject.py $env:GITHUB_WORKSPACE $env:GITHUB_WORKSPACE\.grok-build
+
+      - name: Apply Windows proto patch
+        if: runner.os == 'Windows'
+        working-directory: .grok-build
+        run: git apply ../scripts/windows-proto-build.patch
+
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
         working-directory: .grok-build
         run: cargo build --release -p palmbridge
 
-      - name: Pack
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        working-directory: .grok-build
+        shell: pwsh
+        run: cargo build --release -p palmbridge
+
+      - name: Pack (Unix)
+        if: runner.os != 'Windows'
         run: |
           mkdir -p dist
           cp .grok-build/target/release/palmbridge "dist/${{ matrix.asset }}"
           chmod +x "dist/${{ matrix.asset }}"
+
+      - name: Pack (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item .grok-build\target\release\palmbridge.exe "dist\${{ matrix.asset }}" -Force
 
       - uses: actions/upload-artifact@v4
         with:

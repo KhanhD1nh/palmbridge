@@ -907,6 +907,11 @@ fn stop_supervisor() -> Result<(), String> {
     let _ = fs::remove_file(&pid_file);
     Ok(())
 }
+
+#[cfg(windows)]
+fn uninstall_supervisor() -> Result<(), String> {
+    stop_supervisor()
+}
 // Windows has no persistent supervisor: start the tunnel-client directly and
 // retain its PID so `palmbridge stop` terminates the exact child it started.
 // A background watchdog thread restarts it if the process dies unexpectedly.
@@ -975,10 +980,10 @@ fn wait_port_free(port: u16, timeout: Duration) {
     }
 }
 
-/// Check whether a Windows process is still running via OpenProcess.
+// Check whether a Windows process is still running via OpenProcess.
 #[cfg(windows)]
 #[link(name = "kernel32")]
-extern "system" {
+unsafe extern "system" {
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     fn WaitForSingleObject(handle: *mut std::ffi::c_void, ms: u32) -> u32;

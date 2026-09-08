@@ -89,6 +89,25 @@ def main() -> int:
     quiet_upstream_warnings(grok_build)
 
     root = grok_build / "Cargo.toml"
+    text = root.read_text()
+    member = '    "crates/codegen/palmbridge",'
+    old_member = '    "crates/codegen/grok-harness",'
+    legacy_member = '    "crates/codegen/hands",'
+    if old_member in text:
+        text = text.replace(old_member, member, 1)
+        root.write_text(text)
+    elif legacy_member in text:
+        text = text.replace(legacy_member, member, 1)
+        root.write_text(text)
+    elif member.strip() not in text:
+        needle = '    "crates/codegen/xai-grok-tools",'
+        if needle not in text:
+            print("could not find xai-grok-tools member in grok-build Cargo.toml", file=sys.stderr)
+            return 1
+        text = text.replace(needle, needle + "\n" + member, 1)
+        root.write_text(text)
+    print(f"injected {dest}")
+    return 0
 
 
 if __name__ == "__main__":

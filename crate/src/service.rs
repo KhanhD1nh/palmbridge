@@ -977,14 +977,17 @@ fn wait_port_free(port: u16, timeout: Duration) {
 
 /// Check whether a Windows process is still running via OpenProcess.
 #[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    fn WaitForSingleObject(handle: *mut std::ffi::c_void, ms: u32) -> u32;
+}
+
+#[cfg(windows)]
 fn process_alive(pid: u32) -> bool {
     const SYNCHRONIZE: u32 = 0x0010_0000;
     const WAIT_TIMEOUT: u32 = 258;
-    extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
-        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
-        fn WaitForSingleObject(handle: *mut std::ffi::c_void, ms: u32) -> u32;
-    }
     unsafe {
         let h = OpenProcess(SYNCHRONIZE, 0, pid);
         if h.is_null() {

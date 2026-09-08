@@ -23,6 +23,13 @@ $Asset = $Release.assets | Where-Object { $_.name -like "palmbridge-windows-*.ex
 if (-not $Asset) { throw "No Windows asset found in release $($Release.tag_name)" }
 
 $Dest = "$Prefix\bin\palmbridge.exe"
+# Stop running instances so the binaries can be replaced.
+Get-Process -Name palmbridge, tunnel-client -ErrorAction SilentlyContinue |
+    ForEach-Object {
+        Write-Host "Stopping $($_.Name) (PID $($_.Id))..."
+        $_.Kill()
+    }
+Start-Sleep -Milliseconds 800
 Write-Host "Downloading $($Asset.name) ($([math]::Round($Asset.size/1MB,1)) MB)..."
 Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $Dest
 & $Dest --version

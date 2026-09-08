@@ -904,8 +904,17 @@ fn uninstall_supervisor() -> Result<(), String> {
 
 // Windows has no persistent supervisor: start the tunnel-client directly and
 // retain its PID so `palmbridge stop` terminates the exact child it started.
+// A background watchdog thread restarts it if the process dies unexpectedly.
 #[cfg(windows)]
 fn spawn_tunnel() -> Result<(), String> {
+    let pid = spawn_tunnel_process()?;
+    std::thread::spawn(move || tunnel_watchdog(pid));
+    Ok(())
+}
+
+/// Spawn a single tunnel-client process and return its PID.
+#[cfg(windows)]
+fn spawn_tunnel_process() -> Result<u32, String> {
     let pid_file = host::config_dir().join("palmbridge-tunnel.pid");
     if let Ok(pid) = fs::read_to_string(&pid_file) {
         let _ = Command::new("taskkill")
@@ -930,12 +939,64 @@ fn spawn_tunnel() -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("start tunnel-client: {e}"))?;
+    let id = child.id();
     fs::create_dir_all(host::config_dir()).map_err(|e| format!("mkdir config: {e}"))?;
     fs::write(
         host::config_dir().join("palmbridge-tunnel.pid"),
-        child.id().to_string(),
+        id.to_string(),
     )
-    .map_err(|e| format!("record tunnel pid: {e}"))
+    .map_err(|e| format!("record tunnel pid: {e}"))?;
+    Ok(id)
+}
+
+/// Check whether a Windows process is still running via OpenProcess.
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    // SYNCHRONIZE (0x00100000) is the minimum access to open a handle for waiting.
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+        fn WaitForSingleObject(handle: *mut std::ffi::c_void, ms: u32) -> u32;
+    }
+    const WAIT_TIMEOUT: u32 = 258;
+    unsafe {
+        let h = OpenProcess(SYNCHRONIZE, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let status = WaitForSingleObject(h, 0);
+        CloseHandle(h);
+        status == WAIT_TIMEOUT // still running
+    }
+}
+
+/// Background loop: poll every 15s, restart tunnel-client if it died.
+/// Exits when the PID file is removed (i.e. `stop_supervisor` was called).
+#[cfg(windows)]
+fn tunnel_watchdog(mut current_pid: u32) {
+    let pid_file = host::config_dir().join("palmbridge-tunnel.pid");
+    loop {
+        std::thread::sleep(Duration::from_secs(15));
+        // If PID file was removed, stop was requested — exit watchdog.
+        if !pid_file.exists() {
+            return;
+        }
+        if process_alive(current_pid) {
+            continue;
+        }
+        // Process died unexpectedly. Respawn.
+        match spawn_tunnel_process() {
+            Ok(new_pid) => {
+                eprintln!("[watchdog] tunnel-client {current_pid} died, restarted as {new_pid}");
+                current_pid = new_pid;
+            }
+            Err(e) => {
+                eprintln!("[watchdog] failed to restart tunnel-client: {e}");
+                // Keep trying next cycle.
+            }
+        }
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]

@@ -4,18 +4,20 @@
 //! A LaunchAgent / systemd user unit with KeepAlive is the actual client.
 
 use std::fs;
-use std::io::Read;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::host;
 
+pub const HEALTH_PORT: u16 = 18780;
 pub const HEALTH_LISTEN: &str = "127.0.0.1:18780";
 pub const HEALTH_BASE: &str = "http://127.0.0.1:18780";
+pub const MCP_PORT: u16 = 8787;
 pub const MCP_BASE: &str = "http://127.0.0.1:8787";
 pub const PROFILE: &str = "palmbridge";
 #[cfg(target_os = "macos")]
@@ -39,37 +41,56 @@ fn legacy_profile_files() -> impl Iterator<Item = PathBuf> {
 }
 
 pub fn ready() -> bool {
-    ureq_get(&format!("{HEALTH_BASE}/readyz"))
-        .ok()
-        .is_some_and(|s| s == "ready")
+    http_get(HEALTH_PORT, "/readyz").is_ok_and(|s| s == "ready")
 }
 
 pub fn mcp_ready() -> bool {
-    ureq_get(&format!("{MCP_BASE}/healthz"))
-        .ok()
-        .is_some_and(|s| s == "ok")
+    http_get(MCP_PORT, "/healthz").is_ok_and(|s| s == "ok")
+}
+
+/// Minimal HTTP/1.0 GET over std::net — no subprocess, no deps.
+/// Works from sync threads and tokio workers alike.
+fn http_get(port: u16, path: &str) -> Result<String, ()> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    let addr: SocketAddr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500)).map_err(|_| ())?;
+    stream.set_read_timeout(Some(Duration::from_millis(900))).map_err(|_| ())?;
+    stream.set_write_timeout(Some(Duration::from_millis(500))).map_err(|_| ())?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|_| ())?;
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf).map_err(|_| ())?;
+    let mut parts = buf.splitn(2, "\r\n\r\n");
+    let head = parts.next().unwrap_or("");
+    if !head.starts_with("HTTP/1.1 2") && !head.starts_with("HTTP/1.0 2") {
+        return Err(());
+    }
+    parts.next().map(str::to_string).map(|s| s.trim().to_string()).ok_or(())
+}
+
+fn wait_until(probe: impl Fn() -> bool, timeout: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if probe() {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn wait_mcp(timeout: Duration) -> bool {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if mcp_ready() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    mcp_ready()
+    wait_until(mcp_ready, timeout)
 }
 
 pub fn wait_ready(timeout: Duration) -> bool {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if ready() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(400));
-    }
-    ready()
+    wait_until(ready, timeout)
 }
 
 pub fn status_line() -> String {
@@ -869,6 +890,49 @@ fn uninstall_supervisor() -> Result<(), String> {
         .status();
     Ok(())
 }
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+// Windows supervision model: `palmbridge start` launches a detached
+// `palmbridge --supervise` process that owns both children (tunnel-client and
+// MCP HTTP). The supervisor restarts a child that dies or hangs (health probe
+// fails 3 cycles in a row). `palmbridge stop` kills the supervisor tree so
+// nothing respawns mid-stop, then kills strays and removes the PID files.
+#[cfg(windows)]
+fn supervisor_pid_file() -> PathBuf {
+    host::config_dir().join("palmbridge-supervisor.pid")
+}
+
+#[cfg(windows)]
+fn tunnel_pid_file() -> PathBuf {
+    host::config_dir().join("palmbridge-tunnel.pid")
+}
+
+#[cfg(windows)]
+fn mcp_pid_file() -> PathBuf {
+    host::config_dir().join("palmbridge-mcp.pid")
+}
+
+#[cfg(windows)]
+fn kill_pid_str(pid: &str) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", pid, "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(windows)]
+fn kill_pid_file_tree(pid_file: &Path) {
+    if let Ok(pid) = fs::read_to_string(pid_file) {
+        let pid = pid.trim();
+        if !pid.is_empty() {
+            kill_pid_str(pid);
+        }
+    }
+}
 
 #[cfg(windows)]
 fn install_supervisor() -> Result<(), String> {
@@ -878,35 +942,38 @@ fn install_supervisor() -> Result<(), String> {
 
 #[cfg(windows)]
 fn start_supervisor() -> Result<(), String> {
-    spawn_tunnel()?;
-    if wait_ready(Duration::from_secs(15)) {
-        Ok(())
-    } else {
-        Err("tunnel did not become ready".into())
+    // Idempotent: reuse a healthy supervisor if one is already running.
+    if let Ok(pid) = fs::read_to_string(supervisor_pid_file()) {
+        if let Ok(pid) = pid.trim().parse::<u32>() {
+            if process_alive(pid) {
+                return Ok(());
+            }
+        }
     }
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let child = Command::new(exe)
+        .arg("--supervise")
+        .stdin(Stdio::null())
+        .stdout(log_file("supervisor.out.log"))
+        .stderr(log_file("supervisor.err.log"))
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| format!("start supervisor: {e}"))?;
+    fs::create_dir_all(host::config_dir()).map_err(|e| format!("mkdir config: {e}"))?;
+    fs::write(supervisor_pid_file(), child.id().to_string())
+        .map_err(|e| format!("record supervisor pid: {e}"))?;
+    Ok(())
 }
 
 #[cfg(windows)]
 fn stop_supervisor() -> Result<(), String> {
-    uninstall_mcp()?;
-    let pid_file = host::config_dir().join("palmbridge-tunnel.pid");
-    if let Ok(pid) = fs::read_to_string(&pid_file) {
-        let pid = pid.trim();
-        if !pid.is_empty() {
-            let _ = Command::new("taskkill")
-                .args(["/PID", pid, "/T", "/F"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
-    }
-    // Wait for taskkill to finish before removing the PID file.
-    // The watchdog checks pid_file.exists() first; removing it signals
-    // the watchdog to exit. If we remove it while the process is still
-    // dying, the watchdog could see "file exists + process dead" and
-    // respawn an orphan.
-    std::thread::sleep(Duration::from_millis(500));
-    let _ = fs::remove_file(&pid_file);
+    // Kill the supervisor tree first so nothing respawns mid-stop.
+    kill_pid_file_tree(&supervisor_pid_file());
+    kill_pid_file_tree(&tunnel_pid_file());
+    kill_pid_file_tree(&mcp_pid_file());
+    let _ = fs::remove_file(supervisor_pid_file());
+    let _ = fs::remove_file(tunnel_pid_file());
+    let _ = fs::remove_file(mcp_pid_file());
     Ok(())
 }
 
@@ -914,35 +981,80 @@ fn stop_supervisor() -> Result<(), String> {
 fn uninstall_supervisor() -> Result<(), String> {
     stop_supervisor()
 }
-// Windows has no persistent supervisor: start the tunnel-client directly and
-// retain its PID so `palmbridge stop` terminates the exact child it started.
-// A background watchdog thread restarts it if the process dies unexpectedly.
-#[cfg(windows)]
-static WATCHDOG_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// Entry point for `palmbridge --supervise` (detached, long-lived).
 #[cfg(windows)]
-fn spawn_tunnel() -> Result<(), String> {
-    // Prevent multiple watchdog threads from accumulating across start/stop cycles.
-    if WATCHDOG_RUNNING.swap(true, Ordering::SeqCst) {
-        return Ok(()); // Already running.
+pub fn supervise() {
+    // Write our own PID so `palmbridge stop` can kill the tree. Doing this
+    // inside the supervisor avoids a race with the parent CLI writing it.
+    let _ = fs::write(supervisor_pid_file(), std::process::id().to_string());
+    watchdog_log("supervisor started");
+    let mcp = std::thread::spawn(|| babysit("MCP HTTP", mcp_pid_file(), spawn_mcp_process, mcp_ready));
+    babysit("tunnel-client", tunnel_pid_file(), spawn_tunnel_process, ready);
+    let _ = mcp.join();
+}
+
+/// Watch one child: respawn on death, missing PID file, or after 3
+/// consecutive failed health probes (a hung-but-alive process). Exits when
+/// the supervisor PID file disappears (i.e. `palmbridge stop`).
+#[cfg(windows)]
+fn babysit(
+    name: &str,
+    pid_file: PathBuf,
+    respawn: fn() -> Result<u32, String>,
+    healthy: fn() -> bool,
+) {
+    let mut misses: u32 = 0;
+    let mut first = true;
+    loop {
+        // Probe immediately on entry; afterwards wait 5s between cycles.
+        if !first {
+            std::thread::sleep(Duration::from_secs(5));
+        }
+        first = false;
+        // Stop signal: `palmbridge stop` removes the supervisor PID file.
+        if !supervisor_pid_file().exists() {
+            watchdog_log(&format!("supervisor pid file removed, {name} babysit exiting"));
+            return;
+        }
+        let pid = fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        match pid {
+            Some(pid) if process_alive(pid) => {
+                if healthy() {
+                    misses = 0;
+                    continue;
+                }
+                misses += 1;
+                if misses < 3 {
+                    continue; // transient health blip
+                }
+                watchdog_log(&format!("{name} {pid} hung (health failed {misses}x), killing"));
+            }
+            Some(pid) => {
+                watchdog_log(&format!("{name} {pid} died"));
+            }
+            None => {
+                watchdog_log(&format!("{name} pid file missing or corrupt, respawning"));
+            }
+        }
+        misses = 0;
+        match respawn() {
+            Ok(new) => watchdog_log(&format!("{name} restarted as {new}")),
+            Err(e) => {
+                watchdog_log(&format!("{name} respawn failed: {e}"));
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        }
     }
-    let pid = spawn_tunnel_process()?;
-    std::thread::spawn(move || tunnel_watchdog(pid));
-    Ok(())
 }
 
 /// Spawn a single tunnel-client process and return its PID.
 #[cfg(windows)]
 fn spawn_tunnel_process() -> Result<u32, String> {
-    let pid_file = host::config_dir().join("palmbridge-tunnel.pid");
-    if let Ok(pid) = fs::read_to_string(&pid_file) {
-        let _ = Command::new("taskkill")
-            .args(["/PID", pid.trim(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    let _ = fs::remove_file(&pid_file);
+    kill_pid_file_tree(&tunnel_pid_file());
+    let _ = fs::remove_file(&tunnel_pid_file());
     // Wait for port 18780 to be released instead of fixed sleep.
     wait_port_free(18780, Duration::from_secs(5));
 
@@ -961,12 +1073,26 @@ fn spawn_tunnel_process() -> Result<u32, String> {
         .map_err(|e| format!("start tunnel-client: {e}"))?;
     let id = child.id();
     fs::create_dir_all(host::config_dir()).map_err(|e| format!("mkdir config: {e}"))?;
-    fs::write(
-        host::config_dir().join("palmbridge-tunnel.pid"),
-        id.to_string(),
-    )
-    .map_err(|e| format!("record tunnel pid: {e}"))?;
+    fs::write(tunnel_pid_file(), id.to_string())
+        .map_err(|e| format!("record tunnel pid: {e}"))?;
     Ok(id)
+}
+
+/// Spawn a single MCP HTTP process and return its PID.
+#[cfg(windows)]
+fn spawn_mcp_process() -> Result<u32, String> {
+    uninstall_mcp()?;
+    let child = Command::new(harness_bin()?)
+        .args(["--http", "--port", "8787"])
+        .stdin(Stdio::null())
+        .stdout(log_file("mcp.out.log"))
+        .stderr(log_file("mcp.err.log"))
+        .spawn()
+        .map_err(|e| format!("start MCP HTTP: {e}"))?;
+    fs::create_dir_all(host::config_dir()).map_err(|e| format!("mkdir config: {e}"))?;
+    fs::write(mcp_pid_file(), child.id().to_string())
+        .map_err(|e| format!("record MCP pid: {e}"))?;
+    Ok(child.id())
 }
 
 /// Poll until a TCP port is free or timeout expires.
@@ -997,7 +1123,7 @@ fn log_file(name: &str) -> Stdio {
     }
 }
 
-/// Append a timestamped line to the watchdog event log.
+/// Append a timestamped line to the supervisor event log.
 #[cfg(windows)]
 fn watchdog_log(msg: &str) {
     let dir = host::config_dir().join("logs");
@@ -1040,47 +1166,15 @@ fn process_alive(pid: u32) -> bool {
     }
 }
 
-/// Background loop: poll every 15s, restart tunnel-client if it died.
-/// Exits when the PID file is removed (i.e. `stop_supervisor` was called).
-#[cfg(windows)]
-fn tunnel_watchdog(mut current_pid: u32) {
-    let pid_file = host::config_dir().join("palmbridge-tunnel.pid");
-    watchdog_log("tunnel watchdog started");
-    loop {
-        std::thread::sleep(Duration::from_secs(15));
-        // If PID file was removed, stop was requested — exit watchdog.
-        if !pid_file.exists() {
-            watchdog_log("pid file removed, tunnel watchdog exiting");
-            WATCHDOG_RUNNING.store(false, Ordering::SeqCst);
-            return;
-        }
-        if process_alive(current_pid) {
-            continue;
-        }
-        watchdog_log(&format!("tunnel-client {current_pid} died"));
-        match spawn_tunnel_process() {
-            Ok(new_pid) => {
-                watchdog_log(&format!("tunnel-client restarted as {new_pid}"));
-                eprintln!("[watchdog] tunnel-client {current_pid} died, restarted as {new_pid}");
-                current_pid = new_pid;
-            }
-            Err(e) => {
-                watchdog_log(&format!("failed to restart tunnel-client: {e}"));
-                eprintln!("[watchdog] failed to restart tunnel-client: {e}");
-            }
-        }
-    }
-}
-
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn install_supervisor() -> Result<(), String> {
     Err("auto-start is implemented for macOS and Linux".into())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-fn start_supervisor() -> Result<(), String> {
-    Err("auto-start is implemented for macOS and Linux".into())
-}
+/// On macOS/Linux launchd/systemd KeepAlive supervises; Windows uses this
+/// binary in --supervise mode instead.
+#[cfg(not(windows))]
+pub fn supervise() {}
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn stop_supervisor() -> Result<(), String> {
@@ -1109,77 +1203,14 @@ fn uninstall_mcp() -> Result<(), String> {
 
 #[cfg(windows)]
 fn install_mcp() -> Result<(), String> {
-    uninstall_mcp()?;
-    let child = Command::new(harness_bin()?)
-        .args(["--http", "--port", "8787"])
-        .stdin(Stdio::null())
-        .stdout(log_file("mcp.out.log"))
-        .stderr(log_file("mcp.err.log"))
-        .spawn()
-        .map_err(|e| format!("start MCP HTTP: {e}"))?;
-    fs::create_dir_all(host::config_dir()).map_err(|e| format!("mkdir config: {e}"))?;
-    fs::write(host::config_dir().join("palmbridge-mcp.pid"), child.id().to_string())
-        .map_err(|e| format!("record MCP pid: {e}"))?;
-    // Start MCP watchdog so it auto-restarts if it dies mid-session.
-    std::thread::spawn(mcp_watchdog);
-    Ok(())
+    spawn_mcp_process().map(|_| ())
 }
 
 #[cfg(windows)]
 fn uninstall_mcp() -> Result<(), String> {
-    let pid_file = host::config_dir().join("palmbridge-mcp.pid");
-    if let Ok(pid) = fs::read_to_string(&pid_file) {
-        let _ = Command::new("taskkill")
-            .args(["/PID", pid.trim(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    let _ = fs::remove_file(pid_file);
+    kill_pid_file_tree(&mcp_pid_file());
+    let _ = fs::remove_file(mcp_pid_file());
     Ok(())
-}
-
-/// Background loop: restart MCP HTTP process if it dies while tunnel is up.
-#[cfg(windows)]
-fn mcp_watchdog() {
-    watchdog_log("mcp watchdog started");
-    let pid_file = host::config_dir().join("palmbridge-mcp.pid");
-    loop {
-        std::thread::sleep(Duration::from_secs(15));
-        if !pid_file.exists() {
-            watchdog_log("mcp pid file removed, mcp watchdog exiting");
-            return; // uninstalled
-        }
-        let pid = match fs::read_to_string(&pid_file) {
-            Ok(s) => match s.trim().parse::<u32>() {
-                Ok(p) => p,
-                Err(_) => continue,
-            },
-            Err(_) => return,
-        };
-        if process_alive(pid) {
-            continue;
-        }
-        watchdog_log(&format!("MCP HTTP {pid} died"));
-        // MCP died. Respawn.
-        if let Ok(bin) = harness_bin() {
-            if let Ok(child) = Command::new(bin)
-                .args(["--http", "--port", "8787"])
-                .stdin(Stdio::null())
-                .stdout(log_file("mcp.out.log"))
-                .stderr(log_file("mcp.err.log"))
-                .spawn()
-            {
-                let _ = fs::write(&pid_file, child.id().to_string());
-                watchdog_log(&format!("MCP HTTP restarted as {}", child.id()));
-                eprintln!("[watchdog] MCP HTTP {pid} died, restarted as {}", child.id());
-            } else {
-                watchdog_log("failed to restart MCP HTTP");
-            }
-        } else {
-            watchdog_log("harness binary missing, cannot restart MCP HTTP");
-        }
-    }
 }
 
 #[cfg(windows)]
@@ -1257,23 +1288,4 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-}
-
-pub fn ureq_get(url: &str) -> Result<String, ()> {
-    let mut child = Command::new("curl")
-        .args(["-fsS", "--max-time", "1", url])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| ())?;
-    let mut buf = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        let _ = out.read_to_string(&mut buf);
-    }
-    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
-    if ok {
-        Ok(buf.trim().to_string())
-    } else {
-        Err(())
-    }
 }

@@ -198,6 +198,7 @@ impl McpHost {
                 .accept()
                 .await
                 .map_err(|e| format!("accept: {e}"))?;
+            let _ = stream.set_nodelay(true); // tool-call latency beats batching
             let host = Arc::clone(&self);
             tokio::spawn(async move {
                 let (r, w) = stream.into_split();
@@ -569,11 +570,13 @@ async fn write_http<W: AsyncWrite + Unpin>(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: {conn}\r\n\r\n",
         body.len()
     );
+    let mut buf = Vec::with_capacity(header.len() + body.len());
+    buf.extend_from_slice(header.as_bytes());
+    buf.extend_from_slice(body);
     writer
-        .write_all(header.as_bytes())
+        .write_all(&buf)
         .await
         .map_err(|e| e.to_string())?;
-    writer.write_all(body).await.map_err(|e| e.to_string())?;
     writer.flush().await.map_err(|e| e.to_string())?;
     Ok(())
 }

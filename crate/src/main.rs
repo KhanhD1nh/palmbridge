@@ -31,8 +31,8 @@ Palmbridge — unofficial ChatGPT plugin (local tools, no model)
 Debug:
   palmbridge list
   palmbridge call <tool> <json>
-  palmbridge watch                      notify when tunnel drops (LaunchAgent)
   palmbridge --http [--port N]
+  palmbridge --supervise                detached supervisor (internal)
 ";
 
 enum Cmd {
@@ -44,6 +44,7 @@ enum Cmd {
     Disable,
     Start,
     Stop,
+    Supervise,
     Watch,
     McpStdio,
     McpHttp { addr: SocketAddr },
@@ -60,6 +61,7 @@ fn parse_args() -> Result<(PathBuf, Cmd), String> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--supervise" => return Ok((fallback, Cmd::Supervise)),
             "--cwd" => {
                 let value = args.next().ok_or("--cwd requires a directory")?;
                 fallback = PathBuf::from(value);
@@ -196,6 +198,7 @@ async fn run(fallback: PathBuf, cmd: Cmd) -> Result<(), String> {
         Cmd::Disable => service::disable(),
         Cmd::Start => service::start(),
         Cmd::Stop => service::stop(),
+        Cmd::Supervise => Ok(service::supervise()),
         Cmd::McpStdio => mcp::McpHost::new(fallback).serve_stdio().await,
         Cmd::McpHttp { addr } => mcp::McpHost::new(fallback).serve_http(addr).await,
         Cmd::List | Cmd::Call { .. } => {

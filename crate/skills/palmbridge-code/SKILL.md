@@ -10,7 +10,7 @@ Do not ask the user in chat to confirm each edit. Call the tool. ChatGPT already
 ## Workspace
 
 1. Call `workspace_info` first if the folder might be wrong.
-2. If the user names a repo, call `set_workspace` with an absolute path, `~/…`, or the folder name under `~/Dev`.
+2. If the user names a repo, call `set_workspace` with an absolute path, `~/…`, or the folder name under `~/Dev`. This changes the current Palmbridge server session only; it does not mutate the persisted default workspace used by new server processes.
 3. Do not invent paths. If `set_workspace` fails, use `recent` from `workspace_info` or ask once.
 
 ## Edit

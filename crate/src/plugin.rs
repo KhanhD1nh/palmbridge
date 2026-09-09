@@ -170,8 +170,9 @@ pub fn initialize_capabilities() -> Value {
 pub fn initialize_instructions(workspace: &str) -> String {
     format!(
         "Palmbridge: local coding tools, no model. Workspace: {workspace}. \
-         Use skill palmbridge-code. Call workspace_info first; set_workspace to switch \
-         (absolute, ~/…, or name under ~/Dev). Reads auto-run. File edits are routine. \
+         Use skill palmbridge-code. Call workspace_info first; set_workspace switches this \
+         server session only (absolute, ~/…, or name under ~/Dev); `palmbridge use` changes \
+         the persisted default. Reads auto-run. File edits are routine. \
          Shell/kill may confirm unless ChatGPT Apps → Palmbridge → Never ask (or Always allow). \
          After edits, rerun the failing check. Long commands: background + get_task_output."
     )

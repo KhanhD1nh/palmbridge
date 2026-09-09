@@ -489,7 +489,7 @@ async fn handle_connection<R, W>(
     mut reader: BufReader<R>,
     mut writer: W,
     host: Arc<McpHost>,
-    require_mcp_token: bool,
+    _require_mcp_token: bool,
 ) -> Result<(), String>
 where
     R: AsyncRead + Unpin,
@@ -588,25 +588,14 @@ where
         if path_only == "/.well-known/oauth-protected-resource"
             || path_only == "/.well-known/oauth-protected-resource/mcp"
         {
-            if require_mcp_token {
-                write_http(
-                    &mut writer,
-                    404,
-                    "application/json",
-                    br#"{"error":"not_found"}"#,
-                    keep,
-                )
-                .await?;
-            } else {
-                write_http(
-                    &mut writer,
-                    200,
-                    "application/json",
-                    br#"{"resource":"http://127.0.0.1:8787/mcp"}"#,
-                    keep,
-                )
-                .await?;
-            }
+            write_http(
+                &mut writer,
+                200,
+                "application/json",
+                br#"{"resource":"http://127.0.0.1:8787/mcp"}"#,
+                keep,
+            )
+            .await?;
             if !keep {
                 return Ok(());
             }
@@ -652,18 +641,7 @@ where
             }
             continue;
         }
-        let valid_mcp_path = if require_mcp_token {
-            match security::matches_mcp_tcp_path(path_only) {
-                Ok(valid) => valid,
-                Err(e) => {
-                    eprintln!("mcp auth: {e}");
-                    false
-                }
-            }
-        } else {
-            path_only == "/mcp"
-        };
-        if !matches!(method, "POST" | "DELETE") || !valid_mcp_path {
+        if !matches!(method, "POST" | "DELETE") || path_only != "/mcp" {
             write_http(&mut writer, 404, "text/plain", b"not found", keep).await?;
             if !keep {
                 return Ok(());

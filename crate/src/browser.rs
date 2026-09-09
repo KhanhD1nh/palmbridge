@@ -2,6 +2,7 @@ use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -15,6 +16,11 @@ const DEFAULT_PORT: u16 = 9222;
 const DEFAULT_WIDTH: u32 = 1440;
 const DEFAULT_HEIGHT: u32 = 900;
 const DEFAULT_WAIT_MS: u64 = 600;
+
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
 
 pub fn tool_definition() -> Value {
     json!({
@@ -41,7 +47,7 @@ pub fn tool_definition() -> Value {
                 "wait_ms": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 600 },
                 "width": { "type": "integer", "minimum": 240, "maximum": 7680, "default": 1440 },
                 "height": { "type": "integer", "minimum": 240, "maximum": 4320, "default": 900 },
-                "port": { "type": "integer", "minimum": 1024, "maximum": 65535, "default": 9222 },
+                "port": { "type": "integer", "minimum": 1024, "maximum": 65535, "description": "Optional Chromium debug port. start chooses a free loopback port when omitted; later operations reuse the recorded port." },
                 "headless": { "type": "boolean", "default": false, "description": "Only used by operation=start." },
                 "user_data_dir": { "type": "string", "description": "Optional Chromium user-data directory for operation=start." },
                 "output_path": { "type": "string", "description": "Optional PNG path for screenshot." }
@@ -71,7 +77,10 @@ pub async fn run(arguments: &Value, cwd: &Path) -> Result<String, String> {
 }
 
 async fn start_persistent(arguments: &Value) -> Result<String, String> {
-    let port = arg_u16(arguments, "port", DEFAULT_PORT);
+    let port = match arguments.get("port").and_then(Value::as_u64) {
+        Some(value) => value.min(u16::MAX as u64) as u16,
+        None => free_port()?,
+    };
     if cdp_ready(port).await {
         return Ok(format!("Palmbridge browser is already listening on http://127.0.0.1:{port}."));
     }
@@ -385,7 +394,7 @@ fn inspect_expression(selector: Option<&str>, xpath: Option<&str>) -> String {
 }
 
 async fn cdp_ready(port: u16) -> bool {
-    reqwest::Client::new()
+    http_client()
         .get(format!("http://127.0.0.1:{port}/json/version"))
         .timeout(Duration::from_millis(500))
         .send()
@@ -407,7 +416,7 @@ async fn wait_for_cdp(port: u16, timeout: Duration) -> Result<(), String> {
 async fn wait_for_page_target(port: u16, timeout: Duration) -> Result<Value, String> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        let list: Value = reqwest::Client::new()
+        let list: Value = http_client()
             .get(format!("http://127.0.0.1:{port}/json/list"))
             .send()
             .await
@@ -430,7 +439,7 @@ async fn create_page_target(port: u16, url: &str) -> Result<Value, String> {
     let mut endpoint = reqwest::Url::parse(&format!("http://127.0.0.1:{port}/json/new"))
         .map_err(|e| e.to_string())?;
     endpoint.set_query(Some(url));
-    let response = reqwest::Client::new()
+    let response = http_client()
         .put(endpoint)
         .send()
         .await
@@ -452,8 +461,8 @@ fn spawn_browser(
 ) -> Result<Child, String> {
     let mut cmd = Command::new(executable);
     cmd.arg(format!("--remote-debugging-port={port}"))
+        .arg("--remote-debugging-address=127.0.0.1")
         .arg(format!("--user-data-dir={}", profile.display()))
-        .arg("--remote-allow-origins=*")
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg(format!("--window-size={width},{height}"));
@@ -555,9 +564,8 @@ fn browser_port_path() -> PathBuf {
 }
 
 fn write_browser_state(pid: u32, port: u16) -> Result<(), String> {
-    fs::create_dir_all(crate::host::config_dir()).map_err(|e| e.to_string())?;
-    fs::write(browser_pid_path(), pid.to_string()).map_err(|e| e.to_string())?;
-    fs::write(browser_port_path(), port.to_string()).map_err(|e| e.to_string())?;
+    crate::state::atomic_write(&browser_pid_path(), pid.to_string())?;
+    crate::state::atomic_write(&browser_port_path(), port.to_string())?;
     Ok(())
 }
 

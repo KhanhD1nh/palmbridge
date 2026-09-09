@@ -10,8 +10,8 @@ Fork of [nghyane/hands](https://github.com/nghyane/hands). Not affiliated with O
 
 ## How it works
 
-1. `palmbridge setup` pins the current directory as the active workspace, stores tunnel credentials, writes a `tunnel-client` profile, and starts local services.
-2. On macOS and Linux, `palmbridge --http` starts an MCP server on `127.0.0.1:8787` and a private Unix socket for `tunnel-client`. Windows starts the same loopback MCP server as a companion process; its tunnel-client profile connects through `http://127.0.0.1:8787/mcp`.
+1. `palmbridge setup` pins the current directory as the default workspace, stores tunnel credentials, writes a `tunnel-client` profile, and starts local services.
+2. On macOS and Linux, `palmbridge --http` starts an MCP server on `127.0.0.1:8787` and a private `0600` Unix socket for `tunnel-client`. Windows starts the same loopback MCP server as a companion process; its tunnel-client profile connects through `http://127.0.0.1:8787/mcp`.
 3. `tunnel-client` authenticates to OpenAI using the restricted runtime key and binds the selected `tunnel_...` ID to the local MCP server.
 4. ChatGPT's Tunnel connection sends MCP requests through that existing tunnel. Palmbridge executes the requested tool against the pinned workspace and returns the result through the same path.
 
@@ -38,7 +38,7 @@ sequenceDiagram
 |---|---|---|
 | `palmbridge --http` | MCP HTTP server and local configuration UI | `127.0.0.1:8787` |
 | `tunnel-client` | Authenticated outbound connection to OpenAI | OpenAI control plane; health endpoint `127.0.0.1:18780` when running |
-| Workspace pin | Defines the default repository for tools | `~/.config/palmbridge/workspace` on Unix; `%APPDATA%\palmbridge\workspace` on Windows |
+| Workspace pin | Defines the default repository for new MCP sessions | `~/.config/palmbridge/workspace` on Unix; `%APPDATA%\palmbridge\workspace` on Windows |
 | Tunnel profile | Maps `tunnel-client` to Palmbridge | `~/.config/tunnel-client/palmbridge.yaml` on Unix; `%APPDATA%\tunnel-client\palmbridge.yaml` on Windows |
 | Runtime key file | Read by `tunnel-client`, never sent through MCP | Palmbridge config directory, `0600` on Unix |
 
@@ -46,7 +46,7 @@ sequenceDiagram
 
 ### Workspace and access boundary
 
-Palmbridge pins one workspace, not a sandbox. File tools operate relative to that workspace, but `run_terminal_cmd` runs commands on the host with your user permissions. ChatGPT can change the pin through `set_workspace`; treat access to the ChatGPT connection as access to the local account within ChatGPT's approval policy.
+Palmbridge is not a sandbox. The persisted workspace pin is only the default for new MCP sessions. Streamable HTTP clients that initialize normally receive an `Mcp-Session-Id`, and `set_workspace` changes only that MCP session; it does not rewrite the persisted default. File tools operate relative to the session workspace, but `run_terminal_cmd` still runs commands on the host with your user permissions. Treat access to the ChatGPT connection as access to the local account within ChatGPT's approval policy.
 
 Use a separate OS account or a dedicated working directory when the machine contains repositories or files ChatGPT must not access. Never put keys, tokens, or private data into prompts or committed files.
 
@@ -54,6 +54,8 @@ Use a separate OS account or a dedicated working directory when the machine cont
 
 - The runtime key authenticates `tunnel-client` to OpenAI. Restrict it to **Tunnels: Read** and **Tunnels: Use**.
 - The `tunnel_...` ID identifies the tunnel; it is not a replacement for the runtime key.
+- The local MCP server binds only to loopback. Unix tunnel traffic additionally uses a private Unix socket.
+- Configuration UI mutations require JSON and reject mismatched browser origins/Host headers to reduce localhost CSRF and DNS-rebinding risk.
 - MCP tool traffic uses the outbound tunnel. No inbound port-forwarding or public local listener is configured by Palmbridge.
 - On macOS, the key is also saved in Keychain when interactive setup succeeds. On Linux/Windows, Palmbridge uses `secret-tool` when available. Every platform retains a local key file because `tunnel-client` requires a file-backed profile.
 - `palmbridge status --json` reports local process health; it does not prove ChatGPT authorization or a particular tool's permission.
@@ -64,11 +66,12 @@ Use a separate OS account or a dedicated working directory when the machine cont
 |---|---|---|
 | macOS | LaunchAgents start and keep services alive after login | AC power prevents idle sleep while tunnel waits; lid close on battery may suspend it |
 | Linux | systemd user services start and restart services | Host/user session policy controls sleep and login behavior |
-| Windows | `palmbridge --http` and detached `tunnel-client` processes started by `palmbridge setup` or `palmbridge start` | No persistent supervisor; run `palmbridge start` after reboot or a crash |
+| Windows | Detached Palmbridge supervisor owns MCP + `tunnel-client`, health-checks them, and restarts failed/hung children; a kill-on-close Job Object prevents orphan children | Supervisor is not installed as a boot service; run `palmbridge start` after reboot |
 
 ## Security model
 
 Palmbridge does not contain a model or independently decide actions. ChatGPT chooses tools; the MCP tool annotations tell ChatGPT which operations are read-only or destructive. ChatGPT may still require confirmation based on its own policy. Treat **Never ask** as granting the connected ChatGPT app broad authority to operate with the local user account.
+
 
 Audit before granting broad approval. Keep the tunnel key restricted. Stop the service with `palmbridge stop` when remote access is not needed.
 
@@ -252,7 +255,7 @@ cd C:\path\to\repository
 palmbridge use
 ```
 
-`workspace_info` reports the active workspace. `set_workspace` can switch it from ChatGPT.
+`workspace_info` reports the active session workspace. `set_workspace` switches only the current MCP session; `palmbridge use` changes the persisted default used by new sessions.
 
 | Command | Purpose |
 |---|---|
@@ -265,7 +268,7 @@ palmbridge use
 | `palmbridge list` | List MCP tools |
 | `palmbridge call <tool> <json>` | Call a tool locally for debugging |
 
-macOS uses a LaunchAgent. Linux uses systemd user services. Windows starts a detached background process; after reboot or crash, run `palmbridge start` again.
+macOS uses a LaunchAgent. Linux uses systemd user services. Windows starts a detached supervisor that restarts its MCP/tunnel children; after reboot or a supervisor-level crash, run `palmbridge start` again.
 
 ## ChatGPT approvals
 

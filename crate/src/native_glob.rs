@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -40,7 +42,8 @@ pub fn run(arguments: &Value, cwd: &Path) -> Result<String, String> {
     };
 
     let matcher = compile_matcher(pattern)?;
-    let mut matches = Vec::new();
+    let mut newest: BinaryHeap<Reverse<(SystemTime, PathBuf)>> = BinaryHeap::new();
+    let mut total = 0usize;
 
     let mut builder = WalkBuilder::new(&search_dir);
     builder
@@ -66,11 +69,18 @@ pub fn run(arguments: &Value, cwd: &Path) -> Result<String, String> {
             .metadata()
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        matches.push((modified, path));
+        total += 1;
+        newest.push(Reverse((modified, path)));
+        if newest.len() > RESULT_LIMIT {
+            newest.pop();
+        }
     }
 
+    let mut matches = newest
+        .into_iter()
+        .map(|Reverse(item)| item)
+        .collect::<Vec<_>>();
     matches.sort_by(|a, b| b.0.cmp(&a.0));
-    let total = matches.len();
     let shown = total.min(RESULT_LIMIT);
     let mut lines = matches
         .into_iter()
@@ -96,4 +106,50 @@ fn compile_matcher(pattern: &str) -> Result<GlobMatcher, String> {
     Glob::new(pattern)
         .map(|g| g.compile_matcher())
         .map_err(|e| format!("invalid glob pattern `{pattern}`: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "palmbridge-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn caps_large_results_without_storing_all_matches() {
+        let dir = temp_dir("glob-limit");
+        for i in 0..105 {
+            std::fs::write(dir.join(format!("file-{i:03}.txt")), b"x").unwrap();
+        }
+        let output = run(&json!({"pattern":"*.txt"}), &dir).unwrap();
+        assert!(output.contains("105 files matched"));
+        assert!(output.lines().count() <= 101);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_search_directories_outside_workspace() {
+        let workspace = temp_dir("glob-workspace");
+        let outside = temp_dir("glob-outside");
+        let error = run(
+            &json!({"pattern":"*", "path": outside.display().to_string()}),
+            &workspace,
+        )
+        .unwrap_err();
+        assert!(error.contains("escapes workspace"));
+        let _ = std::fs::remove_dir_all(workspace);
+        let _ = std::fs::remove_dir_all(outside);
+    }
 }

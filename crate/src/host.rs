@@ -95,9 +95,9 @@ pub fn pin_workspace(dir: &Path) -> Result<PathBuf, String> {
     let cwd = dunce::canonicalize(dir).map_err(|e| format!("canonicalize: {e}"))?;
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    std::fs::write(workspace_file(), format!("{}\n", cwd.display()))
+    crate::state::atomic_write(&workspace_file(), format!("{}\n", cwd.display()))
         .map_err(|e| format!("write workspace pin: {e}"))?;
-    push_recent(&cwd);
+    remember_workspace(&cwd);
     Ok(cwd)
 }
 
@@ -122,7 +122,7 @@ pub fn read_recent() -> Vec<PathBuf> {
     out
 }
 
-fn push_recent(cwd: &Path) {
+pub(crate) fn remember_workspace(cwd: &Path) {
     let mut items = read_recent();
     items.retain(|p| p != cwd);
     items.insert(0, cwd.to_path_buf());
@@ -131,7 +131,7 @@ fn push_recent(cwd: &Path) {
         .iter()
         .map(|p| format!("{}\n", p.display()))
         .collect();
-    let _ = std::fs::write(recent_file(), body);
+    let _ = crate::state::atomic_write(&recent_file(), body);
 }
 
 fn expand_tilde(raw: &str) -> PathBuf {

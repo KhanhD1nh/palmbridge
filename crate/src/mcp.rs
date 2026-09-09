@@ -448,17 +448,6 @@ impl McpHost {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{negotiate_protocol, PROTOCOL_VERSION};
-
-    #[test]
-    fn protocol_negotiation_never_echoes_an_unsupported_version() {
-        assert_eq!(negotiate_protocol(Some(PROTOCOL_VERSION)), PROTOCOL_VERSION);
-        assert_eq!(negotiate_protocol(Some("2026-07-28")), PROTOCOL_VERSION);
-        assert_eq!(negotiate_protocol(None), PROTOCOL_VERSION);
-    }
-}
 
 fn rpc_error(id: Value, code: i64, message: String) -> Value {
     rpc_error_with_data(id, code, message, Value::Null)
@@ -829,4 +818,15 @@ async fn write_http_with_headers<W: AsyncWrite + Unpin>(
         .map_err(|e| e.to_string())?;
     writer.flush().await.map_err(|e| e.to_string())?;
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::{negotiate_protocol, PROTOCOL_VERSION};
+
+    #[test]
+    fn protocol_negotiation_never_echoes_an_unsupported_version() {
+        assert_eq!(negotiate_protocol(Some(PROTOCOL_VERSION)), PROTOCOL_VERSION);
+        assert_eq!(negotiate_protocol(Some("2026-07-28")), PROTOCOL_VERSION);
+        assert_eq!(negotiate_protocol(None), PROTOCOL_VERSION);
+    }
 }

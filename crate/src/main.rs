@@ -200,7 +200,10 @@ async fn run(fallback: PathBuf, cmd: Cmd) -> Result<(), String> {
         Cmd::Disable => service::disable(),
         Cmd::Start => service::start(),
         Cmd::Stop => service::stop(),
-        Cmd::Supervise => Ok(service::supervise()),
+        Cmd::Supervise => {
+            service::supervise();
+            Ok(())
+        }
         Cmd::McpStdio => mcp::McpHost::new(fallback).serve_stdio().await,
         Cmd::McpHttp { addr } => mcp::McpHost::new(fallback).serve_http(addr).await,
         Cmd::List | Cmd::Call { .. } => {

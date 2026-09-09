@@ -82,6 +82,7 @@ fn json_ok(status: u16, v: Value) -> (u16, &'static str, Vec<u8>) {
     )
 }
 
+#[allow(clippy::disallowed_methods)] // OS opener intentionally outlives this short CLI command.
 pub fn open_browser(url: &str) {
     let _ = if cfg!(target_os = "macos") {
         std::process::Command::new("open").arg(url).spawn()

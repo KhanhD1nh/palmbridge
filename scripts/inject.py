@@ -50,6 +50,26 @@ def quiet_upstream_warnings(grok_build: Path) -> None:
                 "pub(super) struct ParentAnchor {\n    path: PathBuf,\n    identity: FileIdentity,\n    #[allow(dead_code)]\n    directory: fs::File,\n}",
             ),
         ],
+        codegen / "xai-grok-config" / "src" / "shell.rs": [
+            (
+                "        // pwsh (PowerShell 7+).\n        if let Ok(output) = {",
+                "        // pwsh (PowerShell 7+).\n        #[allow(clippy::collapsible_if)]\n        if let Ok(output) = {",
+            ),
+            (
+                "    // Fall back to PATH; prefer Git Bash over WSL bash.\n    if let Ok(output) = {",
+                "    // Fall back to PATH; prefer Git Bash over WSL bash.\n    #[allow(clippy::collapsible_if)]\n    if let Ok(output) = {",
+            ),
+        ],
+        codegen / "xai-file-utils" / "src" / "workspace_classifier.rs": [
+            (
+                "    if let Ok(temp) = std::env::var(\"TEMP\").or_else(|_| std::env::var(\"TMP\")) {",
+                "    #[allow(clippy::collapsible_if)]\n    if let Ok(temp) = std::env::var(\"TEMP\").or_else(|_| std::env::var(\"TMP\")) {",
+            ),
+            (
+                "    if cwd.parent().map_or(false, |p| p.parent().is_none()) && cwd.to_string_lossy().len() <= 3 {",
+                "    #[allow(clippy::unnecessary_map_or)]\n    if cwd.parent().map_or(false, |p| p.parent().is_none()) && cwd.to_string_lossy().len() <= 3 {",
+            ),
+        ],
     }
     for path, fixes in file_fixes.items():
         if not path.is_file():

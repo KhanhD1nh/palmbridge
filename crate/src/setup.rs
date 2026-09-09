@@ -103,6 +103,7 @@ fn read_secret() -> Result<Option<String>, String> {
     Ok(if t.is_empty() { None } else { Some(t) })
 }
 
+#[allow(clippy::disallowed_methods)] // Clipboard helper is synchronously awaited below.
 fn copy_clip(text: &str) {
     let try_copy = |bin: &str, args: &[&str]| {
         let mut c = Command::new(bin);

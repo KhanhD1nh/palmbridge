@@ -183,10 +183,10 @@ pub fn resolve_workspace(fallback: &Path) -> PathBuf {
     for var in ["PALMBRIDGE_WORKSPACE", "HANDS_WORKSPACE", "GROK_HARNESS_WORKSPACE"] {
         if let Ok(env_path) = std::env::var(var) {
             let p = PathBuf::from(env_path);
-            if let Ok(c) = dunce::canonicalize(&p) {
-                if c.is_dir() {
-                    return c;
-                }
+            if let Ok(c) = dunce::canonicalize(&p)
+                && c.is_dir()
+            {
+                return c;
             }
         }
     }

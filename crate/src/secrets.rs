@@ -32,13 +32,12 @@ pub fn get() -> Option<String> {
         }
     }
     // Keychain can prompt; only from a TTY (palmbridge setup), never LaunchAgent.
-    if std::io::stdin().is_terminal() {
-        if let Some(k) = keychain_get() {
-            if valid_runtime_key(&k) {
-                let _ = ensure_file(&k);
-                return Some(k);
-            }
-        }
+    if std::io::stdin().is_terminal()
+        && let Some(k) = keychain_get()
+        && valid_runtime_key(&k)
+    {
+        let _ = ensure_file(&k);
+        return Some(k);
     }
     None
 }
@@ -142,6 +141,7 @@ fn secret_tool_get() -> Option<String> {
 
 #[cfg(not(target_os = "macos"))]
 fn secret_tool_set(key: &str) -> Result<(), String> {
+    #[allow(clippy::disallowed_methods)] // Synchronous keychain write is awaited below.
     let mut child = match Command::new("secret-tool")
         .args([
             "store",

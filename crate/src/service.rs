@@ -1027,9 +1027,7 @@ fn supervisor_job() -> Result<*mut std::ffi::c_void, String> {
 fn assign_to_supervisor_job(child: &std::process::Child) {
     match supervisor_job() {
         Ok(job) => {
-            let ok = unsafe {
-                AssignProcessToJobObject(job, child.as_raw_handle() as *mut std::ffi::c_void)
-            };
+            let ok = unsafe { AssignProcessToJobObject(job, child.as_raw_handle()) };
             if ok == 0 {
                 watchdog_log("warning: AssignProcessToJobObject failed; PID fallback remains active");
             }
@@ -1084,14 +1082,14 @@ fn install_supervisor() -> Result<(), String> {
 }
 
 #[cfg(windows)]
+#[allow(clippy::disallowed_methods)] // Detached Palmbridge supervisor owns the process tree.
 fn start_supervisor() -> Result<(), String> {
     // Idempotent: reuse a healthy supervisor if one is already running.
-    if let Ok(pid) = fs::read_to_string(supervisor_pid_file()) {
-        if let Ok(pid) = pid.trim().parse::<u32>() {
-            if process_alive(pid) {
-                return Ok(());
-            }
-        }
+    if let Ok(pid) = fs::read_to_string(supervisor_pid_file())
+        && let Ok(pid) = pid.trim().parse::<u32>()
+        && process_alive(pid)
+    {
+        return Ok(());
     }
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let child = Command::new(exe)
@@ -1198,9 +1196,10 @@ fn babysit(
 
 /// Spawn a single tunnel-client process and return its PID.
 #[cfg(windows)]
+#[allow(clippy::disallowed_methods)] // The detached supervisor owns this child.
 fn spawn_tunnel_process() -> Result<u32, String> {
     kill_pid_file_tree(&tunnel_pid_file());
-    let _ = fs::remove_file(&tunnel_pid_file());
+    let _ = fs::remove_file(tunnel_pid_file());
     // Wait for port 18780 to be released instead of fixed sleep.
     wait_port_free(18780, Duration::from_secs(5));
 
@@ -1228,6 +1227,7 @@ fn spawn_tunnel_process() -> Result<u32, String> {
 
 /// Spawn a single MCP HTTP process and return its PID.
 #[cfg(windows)]
+#[allow(clippy::disallowed_methods)] // The detached supervisor owns this child.
 fn spawn_mcp_process() -> Result<u32, String> {
     uninstall_mcp()?;
     let child = Command::new(harness_bin()?)
@@ -1364,10 +1364,6 @@ fn uninstall_mcp() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(windows)]
-fn install_mcp() -> Result<(), String> {
-    spawn_mcp_process().map(|_| ())
-}
 
 #[cfg(windows)]
 fn uninstall_mcp() -> Result<(), String> {

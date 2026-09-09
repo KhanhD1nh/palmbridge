@@ -2,7 +2,7 @@ use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -17,9 +17,11 @@ const DEFAULT_WIDTH: u32 = 1440;
 const DEFAULT_HEIGHT: u32 = 900;
 const DEFAULT_WAIT_MS: u64 = 600;
 
+#[allow(clippy::disallowed_methods)] // Loopback-only CDP client; no external TLS.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+
 fn http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    &HTTP_CLIENT
 }
 
 pub fn tool_definition() -> Value {
@@ -450,6 +452,7 @@ async fn create_page_target(port: u16, url: &str) -> Result<Value, String> {
     response.json().await.map_err(|e| format!("parse new Chromium target: {e}"))
 }
 
+#[allow(clippy::disallowed_methods)] // Browser lifecycle is owned by Palmbridge, not an MCP task scope.
 fn spawn_browser(
     executable: &Path,
     port: u16,

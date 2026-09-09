@@ -290,9 +290,7 @@ impl McpHost {
 
     async fn handle_rpc(&self, session: &SessionState, msg: Value) -> Option<Value> {
         let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
-        let Some(id) = msg.get("id").cloned() else {
-            return None;
-        };
+        let id = msg.get("id").cloned()?;
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
 
         let result = match method {

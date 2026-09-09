@@ -5,11 +5,15 @@
 
 use std::fs;
 #[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(windows)]
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::host;
@@ -125,6 +129,29 @@ pub fn ensure() -> Result<bool, String> {
     Ok(wait_ready(Duration::from_secs(12)))
 }
 
+#[cfg(windows)]
+pub fn enable() -> Result<(), String> {
+    host::migrate_from_legacy();
+    let key = persist_key()?;
+    let tunnel_id = resolve_tunnel_id()?;
+    let client = tunnel_client_bin()?;
+    write_profile(&key, &tunnel_id)?;
+    write_wrapper(&client)?;
+    install_supervisor()?;
+    let _ = install_watch();
+    if wait_mcp(Duration::from_secs(8)) && wait_ready(Duration::from_secs(15)) {
+        eprintln!("tunnel on. login start + restart. config: palmbridge config");
+        eprintln!("admin  {HEALTH_BASE}/ui");
+        Ok(())
+    } else {
+        Err(format!(
+            "service installed but tunnel is not up yet. logs: {}",
+            host::config_dir().join("logs").display()
+        ))
+    }
+}
+
+#[cfg(not(windows))]
 pub fn enable() -> Result<(), String> {
     host::migrate_from_legacy();
     let key = persist_key()?;
@@ -156,6 +183,25 @@ pub fn disable() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub fn start() -> Result<(), String> {
+    if !installed() {
+        return enable();
+    }
+    write_profile(&persist_key()?, &resolve_tunnel_id()?)?;
+    start_supervisor()?;
+    if wait_mcp(Duration::from_secs(8)) && wait_ready(Duration::from_secs(15)) {
+        eprintln!("tunnel ready  {HEALTH_BASE}/ui");
+        Ok(())
+    } else {
+        Err(format!(
+            "tunnel is starting; logs: {}",
+            host::config_dir().join("logs").display()
+        ))
+    }
+}
+
+#[cfg(not(windows))]
 pub fn start() -> Result<(), String> {
     if !installed() {
         return enable();
@@ -248,16 +294,7 @@ fn persist_key() -> Result<PathBuf, String> {
 }
 
 fn write_secret(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    }
-    fs::write(path, format!("{}\n", contents.trim()))
-        .map_err(|e| format!("write {}: {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    crate::state::atomic_write_private(path, format!("{}\n", contents.trim()))
 }
 
 fn resolve_tunnel_id() -> Result<String, String> {
@@ -329,12 +366,8 @@ mcp:
   server_urls:
 {mcp_server}"#
     );
-    fs::write(&path, yaml).map_err(|e| format!("write {}: {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    crate::state::atomic_write_private(&path, yaml)
+        .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 fn wrapper_path() -> PathBuf {
@@ -895,6 +928,115 @@ fn uninstall_supervisor() -> Result<(), String> {
 const DETACHED_PROCESS: u32 = 0x0000_0008;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(windows)]
+const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+#[cfg(windows)]
+const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+
+#[cfg(windows)]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct JobObjectBasicLimitInformation {
+    PerProcessUserTimeLimit: i64,
+    PerJobUserTimeLimit: i64,
+    LimitFlags: u32,
+    MinimumWorkingSetSize: usize,
+    MaximumWorkingSetSize: usize,
+    ActiveProcessLimit: u32,
+    Affinity: usize,
+    PriorityClass: u32,
+    SchedulingClass: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct IoCounters {
+    ReadOperationCount: u64,
+    WriteOperationCount: u64,
+    OtherOperationCount: u64,
+    ReadTransferCount: u64,
+    WriteTransferCount: u64,
+    OtherTransferCount: u64,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct JobObjectExtendedLimitInformation {
+    BasicLimitInformation: JobObjectBasicLimitInformation,
+    IoInfo: IoCounters,
+    ProcessMemoryLimit: usize,
+    JobMemoryLimit: usize,
+    PeakProcessMemoryUsed: usize,
+    PeakJobMemoryUsed: usize,
+}
+
+#[cfg(windows)]
+fn supervisor_job() -> Result<*mut std::ffi::c_void, String> {
+    static JOB: OnceLock<usize> = OnceLock::new();
+    if let Some(handle) = JOB.get() {
+        return Ok(*handle as *mut std::ffi::c_void);
+    }
+    let handle = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
+    if handle.is_null() {
+        return Err("CreateJobObjectW failed".into());
+    }
+    let info = JobObjectExtendedLimitInformation {
+        BasicLimitInformation: JobObjectBasicLimitInformation {
+            PerProcessUserTimeLimit: 0,
+            PerJobUserTimeLimit: 0,
+            LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            MinimumWorkingSetSize: 0,
+            MaximumWorkingSetSize: 0,
+            ActiveProcessLimit: 0,
+            Affinity: 0,
+            PriorityClass: 0,
+            SchedulingClass: 0,
+        },
+        IoInfo: IoCounters {
+            ReadOperationCount: 0,
+            WriteOperationCount: 0,
+            OtherOperationCount: 0,
+            ReadTransferCount: 0,
+            WriteTransferCount: 0,
+            OtherTransferCount: 0,
+        },
+        ProcessMemoryLimit: 0,
+        JobMemoryLimit: 0,
+        PeakProcessMemoryUsed: 0,
+        PeakJobMemoryUsed: 0,
+    };
+    let ok = unsafe {
+        SetInformationJobObject(
+            handle,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JobObjectExtendedLimitInformation>() as u32,
+        )
+    };
+    if ok == 0 {
+        unsafe { CloseHandle(handle) };
+        return Err("SetInformationJobObject failed".into());
+    }
+    let _ = JOB.set(handle as usize);
+    Ok(handle)
+}
+
+#[cfg(windows)]
+fn assign_to_supervisor_job(child: &std::process::Child) {
+    match supervisor_job() {
+        Ok(job) => {
+            let ok = unsafe {
+                AssignProcessToJobObject(job, child.as_raw_handle() as *mut std::ffi::c_void)
+            };
+            if ok == 0 {
+                watchdog_log("warning: AssignProcessToJobObject failed; PID fallback remains active");
+            }
+        }
+        Err(e) => watchdog_log(&format!("warning: supervisor job unavailable: {e}")),
+    }
+}
 
 // Windows supervision model: `palmbridge start` launches a detached
 // `palmbridge --supervise` process that owns both children (tunnel-client and
@@ -961,7 +1103,7 @@ fn start_supervisor() -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("start supervisor: {e}"))?;
     fs::create_dir_all(host::config_dir()).map_err(|e| format!("mkdir config: {e}"))?;
-    fs::write(supervisor_pid_file(), child.id().to_string())
+    crate::state::atomic_write(&supervisor_pid_file(), child.id().to_string())
         .map_err(|e| format!("record supervisor pid: {e}"))?;
     Ok(())
 }
@@ -988,7 +1130,10 @@ fn uninstall_supervisor() -> Result<(), String> {
 pub fn supervise() {
     // Write our own PID so `palmbridge stop` can kill the tree. Doing this
     // inside the supervisor avoids a race with the parent CLI writing it.
-    let _ = fs::write(supervisor_pid_file(), std::process::id().to_string());
+    let _ = crate::state::atomic_write(&supervisor_pid_file(), std::process::id().to_string());
+    if let Err(e) = supervisor_job() {
+        watchdog_log(&format!("warning: could not create kill-on-close job: {e}"));
+    }
     watchdog_log("supervisor started");
     let mcp = std::thread::spawn(|| babysit("MCP HTTP", mcp_pid_file(), spawn_mcp_process, mcp_ready));
     babysit("tunnel-client", tunnel_pid_file(), spawn_tunnel_process, ready);
@@ -1073,9 +1218,10 @@ fn spawn_tunnel_process() -> Result<u32, String> {
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("start tunnel-client: {e}"))?;
+    assign_to_supervisor_job(&child);
     let id = child.id();
     fs::create_dir_all(host::config_dir()).map_err(|e| format!("mkdir config: {e}"))?;
-    fs::write(tunnel_pid_file(), id.to_string())
+    crate::state::atomic_write(&tunnel_pid_file(), id.to_string())
         .map_err(|e| format!("record tunnel pid: {e}"))?;
     Ok(id)
 }
@@ -1091,8 +1237,9 @@ fn spawn_mcp_process() -> Result<u32, String> {
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("start MCP HTTP: {e}"))?;
+    assign_to_supervisor_job(&child);
     fs::create_dir_all(host::config_dir()).map_err(|e| format!("mkdir config: {e}"))?;
-    fs::write(mcp_pid_file(), child.id().to_string())
+    crate::state::atomic_write(&mcp_pid_file(), child.id().to_string())
         .map_err(|e| format!("record MCP pid: {e}"))?;
     Ok(child.id())
 }
@@ -1148,6 +1295,20 @@ fn watchdog_log(msg: &str) {
 #[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn CreateJobObjectW(
+        attributes: *mut std::ffi::c_void,
+        name: *const u16,
+    ) -> *mut std::ffi::c_void;
+    fn SetInformationJobObject(
+        job: *mut std::ffi::c_void,
+        info_class: i32,
+        info: *const std::ffi::c_void,
+        info_length: u32,
+    ) -> i32;
+    fn AssignProcessToJobObject(
+        job: *mut std::ffi::c_void,
+        process: *mut std::ffi::c_void,
+    ) -> i32;
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     fn WaitForSingleObject(handle: *mut std::ffi::c_void, ms: u32) -> u32;

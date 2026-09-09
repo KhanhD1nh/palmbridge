@@ -1,10 +1,13 @@
 //! MCP JSON-RPC over stdio (newline-delimited) and Streamable HTTP POST /mcp.
 //! No extra crates: ChatGPT tunnel-client speaks stdio; Inspector can use HTTP.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -16,37 +19,63 @@ use xai_grok_tools::bridge::ToolBridge;
 
 use crate::host;
 use crate::plugin;
+use crate::security;
 use crate::ui;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "Palmbridge";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_HTTP_SESSIONS: usize = 256;
 
+fn negotiate_protocol(requested: Option<&str>) -> &'static str {
+    match requested {
+        Some(PROTOCOL_VERSION) | None => PROTOCOL_VERSION,
+        Some(_) => PROTOCOL_VERSION,
+    }
+}
+
+
+struct SessionState {
+    workspace: RwLock<PathBuf>,
+    cached: Mutex<Option<(PathBuf, ToolBridge)>>,
+}
+
+struct SessionEntry {
+    state: Arc<SessionState>,
+    last_used: Instant,
+}
 
 pub struct McpHost {
     fallback_cwd: PathBuf,
-    cached: Mutex<Option<(PathBuf, ToolBridge)>>,
+    default: Arc<SessionState>,
+    sessions: Mutex<HashMap<String, SessionEntry>>,
     call_seq: AtomicU64,
 }
 
 impl McpHost {
     pub fn new(fallback_cwd: PathBuf) -> Arc<Self> {
+        let workspace = host::resolve_workspace(&fallback_cwd);
         Arc::new(Self {
             fallback_cwd,
-            cached: Mutex::new(None),
+            default: Arc::new(SessionState {
+                workspace: RwLock::new(workspace),
+                cached: Mutex::new(None),
+            }),
+            sessions: Mutex::new(HashMap::new()),
             call_seq: AtomicU64::new(1),
         })
     }
 
     pub async fn debug_list(&self) -> Result<Value, String> {
-        self.tools_list()
+        self.tools_list(&self.default)
             .await
             .map_err(|(_, message, _)| message)
     }
 
     pub async fn debug_call(&self, name: &str, arguments: Value) -> Result<String, String> {
         let result = self
-            .tools_call(json!({ "name": name, "arguments": arguments }))
+            .tools_call(&self.default, json!({ "name": name, "arguments": arguments }))
             .await
             .map_err(|(_, message, _)| message)?;
         let text = result
@@ -64,13 +93,16 @@ impl McpHost {
         }
     }
 
-    fn workspace(&self) -> PathBuf {
-        host::resolve_workspace(&self.fallback_cwd)
+    fn workspace(&self, session: &SessionState) -> PathBuf {
+        session.workspace
+            .read()
+            .map(|path| path.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 
-    async fn bridge(&self) -> Result<ToolBridge, String> {
-        let cwd = self.workspace();
-        let mut cache = self.cached.lock().await;
+    async fn bridge(&self, session: &SessionState) -> Result<ToolBridge, String> {
+        let cwd = self.workspace(session);
+        let mut cache = session.cached.lock().await;
         if let Some((path, bridge)) = cache.as_ref()
             && path == &cwd
         {
@@ -81,8 +113,8 @@ impl McpHost {
         Ok(bridge)
     }
 
-    fn workspace_info_result(&self) -> Value {
-        let cwd = self.workspace();
+    fn workspace_info_result(&self, session: &SessionState) -> Value {
+        let cwd = self.workspace(session);
         let mut lines = vec![format!("workspace: {}", cwd.display())];
         let recent: Vec<String> = host::read_recent()
             .into_iter()
@@ -110,12 +142,59 @@ impl McpHost {
         })
     }
 
-    async fn switch_workspace(&self, raw: &str) -> Result<PathBuf, String> {
+    async fn switch_workspace(&self, session: &SessionState, raw: &str) -> Result<PathBuf, String> {
         let path = host::resolve_project(raw)?;
-        let cwd = host::pin_workspace(&path)?;
-        let mut cache = self.cached.lock().await;
+        let cwd = dunce::canonicalize(&path).map_err(|e| format!("canonicalize: {e}"))?;
+        match session.workspace.write() {
+            Ok(mut workspace) => *workspace = cwd.clone(),
+            Err(poisoned) => *poisoned.into_inner() = cwd.clone(),
+        }
+        host::remember_workspace(&cwd);
+        let mut cache = session.cached.lock().await;
         *cache = None;
         Ok(cwd)
+    }
+
+    fn fresh_session_state(&self) -> Arc<SessionState> {
+        Arc::new(SessionState {
+            // The persisted pin is a default for *new* sessions. Re-resolve it
+            // here so `palmbridge use` takes effect without disrupting sessions
+            // that are already active on another repository.
+            workspace: RwLock::new(host::resolve_workspace(&self.fallback_cwd)),
+            cached: Mutex::new(None),
+        })
+    }
+
+    async fn begin_http_session(&self) -> Result<(String, Arc<SessionState>), String> {
+        let id = security::new_session_id()?;
+        let session = self.fresh_session_state();
+        let now = Instant::now();
+        let mut sessions = self.sessions.lock().await;
+        sessions.retain(|_, entry| now.duration_since(entry.last_used) < SESSION_TTL);
+        if sessions.len() >= MAX_HTTP_SESSIONS {
+            return Err("too many active MCP HTTP sessions".into());
+        }
+        sessions.insert(
+            id.clone(),
+            SessionEntry {
+                state: Arc::clone(&session),
+                last_used: now,
+            },
+        );
+        Ok((id, session))
+    }
+
+    async fn http_session(&self, id: &str) -> Option<Arc<SessionState>> {
+        let now = Instant::now();
+        let mut sessions = self.sessions.lock().await;
+        sessions.retain(|_, entry| now.duration_since(entry.last_used) < SESSION_TTL);
+        let entry = sessions.get_mut(id)?;
+        entry.last_used = now;
+        Some(Arc::clone(&entry.state))
+    }
+
+    async fn end_http_session(&self, id: &str) -> bool {
+        self.sessions.lock().await.remove(id).is_some()
     }
 
     pub async fn serve_stdio(self: Arc<Self>) -> Result<(), String> {
@@ -139,7 +218,7 @@ impl McpHost {
                     continue;
                 }
             };
-            if let Some(resp) = self.handle_rpc(msg).await {
+            if let Some(resp) = self.handle_rpc(&self.default, msg).await {
                 write_line(&mut stdout, &resp).await?;
             }
         }
@@ -149,7 +228,7 @@ impl McpHost {
     pub async fn serve_http(self: Arc<Self>, addr: SocketAddr) -> Result<(), String> {
         let warm = Arc::clone(&self);
         tokio::spawn(async move {
-            if let Err(e) = warm.bridge().await {
+            if let Err(e) = warm.bridge(&warm.default).await {
                 eprintln!("warmup: {e}");
             }
         });
@@ -177,7 +256,7 @@ impl McpHost {
                             tokio::spawn(async move {
                                 let (r, w) = stream.into_split();
                                 if let Err(e) =
-                                    handle_connection(BufReader::new(r), w, host).await
+                                    handle_connection(BufReader::new(r), w, host, false).await
                                 {
                                     eprintln!("uds: {e}");
                                 }
@@ -202,14 +281,14 @@ impl McpHost {
             let host = Arc::clone(&self);
             tokio::spawn(async move {
                 let (r, w) = stream.into_split();
-                if let Err(e) = handle_connection(BufReader::new(r), w, host).await {
+                if let Err(e) = handle_connection(BufReader::new(r), w, host, false).await {
                     eprintln!("http: {e}");
                 }
             });
         }
     }
 
-    async fn handle_rpc(&self, msg: Value) -> Option<Value> {
+    async fn handle_rpc(&self, session: &SessionState, msg: Value) -> Option<Value> {
         let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
         let Some(id) = msg.get("id").cloned() else {
             return None;
@@ -217,10 +296,10 @@ impl McpHost {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
 
         let result = match method {
-            "initialize" => Ok(self.initialize(params)),
+            "initialize" => Ok(self.initialize(session, params)),
             "ping" => Ok(json!({})),
-            "tools/list" => self.tools_list().await,
-            "tools/call" => self.tools_call(params).await,
+            "tools/list" => self.tools_list(session).await,
+            "tools/call" => self.tools_call(session, params).await,
             "skills/list" => Ok(plugin::skills_list()),
             "skills/get" => plugin::skills_get(&params),
             "resources/list" => Ok(plugin::resources_list()),
@@ -238,25 +317,24 @@ impl McpHost {
         })
     }
 
-    fn initialize(&self, params: Value) -> Value {
-        let client_version = params
-            .get("protocolVersion")
-            .and_then(Value::as_str)
-            .unwrap_or(PROTOCOL_VERSION);
+    fn initialize(&self, session: &SessionState, params: Value) -> Value {
+        let negotiated_version = negotiate_protocol(
+            params.get("protocolVersion").and_then(Value::as_str),
+        );
         json!({
-            "protocolVersion": client_version,
+            "protocolVersion": negotiated_version,
             "capabilities": plugin::initialize_capabilities(),
             "serverInfo": {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
             },
             "instructions": plugin::initialize_instructions(
-                &self.workspace().display().to_string()
+                &self.workspace(session).display().to_string()
             ),
         })
     }
 
-    async fn tools_list(&self) -> Result<Value, (i64, String, Value)> {
+    async fn tools_list(&self, session: &SessionState) -> Result<Value, (i64, String, Value)> {
         let mut tools = vec![
             plugin::tool_descriptor(
                 "workspace_info",
@@ -265,7 +343,7 @@ impl McpHost {
             ),
             plugin::tool_descriptor(
                 "set_workspace",
-                "Use this when the user wants another repo, including while they are not at the machine. Pins the active workspace. Accepts an absolute path, ~/path, or a short name resolved under ~/Dev (e.g. bunko).",
+                "Use this when the user wants another repo, including while they are not at the machine. Switches the current Palmbridge server session without changing the persisted default. Accepts an absolute path, ~/path, or a short name resolved under ~/Dev (e.g. bunko).",
                 json!({
                     "type": "object",
                     "properties": {
@@ -279,7 +357,7 @@ impl McpHost {
             ),
         ];
         let defs = self
-            .bridge()
+            .bridge(session)
             .await
             .map_err(|e| (-32603, e, Value::Null))?
             .tool_definitions()
@@ -293,13 +371,13 @@ impl McpHost {
         Ok(json!({ "tools": tools }))
     }
 
-    async fn tools_call(&self, params: Value) -> Result<Value, (i64, String, Value)> {
+    async fn tools_call(&self, session: &SessionState, params: Value) -> Result<Value, (i64, String, Value)> {
         let name = params
             .get("name")
             .and_then(Value::as_str)
             .ok_or((-32602, "tools/call requires name".into(), Value::Null))?;
         if name == "workspace_info" {
-            return Ok(self.workspace_info_result());
+            return Ok(self.workspace_info_result(session));
         }
         if name == "set_workspace" {
             let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -307,11 +385,11 @@ impl McpHost {
                 .get("path")
                 .and_then(Value::as_str)
                 .ok_or((-32602, "set_workspace requires path".into(), Value::Null))?;
-            return match self.switch_workspace(path).await {
+            return match self.switch_workspace(session, path).await {
                 Ok(cwd) => Ok(json!({
                     "content": [{
                         "type": "text",
-                        "text": format!("workspace pinned: {}\nLater tools use this folder until set_workspace is called again.", cwd.display())
+                        "text": format!("workspace switched for this Palmbridge server session: {}\nThe persisted default workspace was not changed.", cwd.display())
                     }],
                     "structuredContent": {
                         "workspace": cwd.display().to_string()
@@ -326,7 +404,7 @@ impl McpHost {
         }
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
         if name == "glob" {
-            let cwd = self.workspace();
+            let cwd = self.workspace(session);
             return match crate::native_glob::run(&arguments, &cwd) {
                 Ok(text) => Ok(json!({
                     "content": [{ "type": "text", "text": text }],
@@ -339,7 +417,7 @@ impl McpHost {
             };
         }
         if name == "browser" {
-            let cwd = self.workspace();
+            let cwd = self.workspace(session);
             return match crate::browser::run(&arguments, &cwd).await {
                 Ok(text) => Ok(json!({
                     "content": [{ "type": "text", "text": text }],
@@ -356,7 +434,7 @@ impl McpHost {
             self.call_seq.fetch_add(1, Ordering::Relaxed)
         );
         let bridge = self
-            .bridge()
+            .bridge(session)
             .await
             .map_err(|e| (-32603, e, Value::Null))?;
         match bridge.call(name, arguments, &call_id).await {
@@ -369,6 +447,18 @@ impl McpHost {
                 "isError": true
             })),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{negotiate_protocol, PROTOCOL_VERSION};
+
+    #[test]
+    fn protocol_negotiation_never_echoes_an_unsupported_version() {
+        assert_eq!(negotiate_protocol(Some(PROTOCOL_VERSION)), PROTOCOL_VERSION);
+        assert_eq!(negotiate_protocol(Some("2026-07-28")), PROTOCOL_VERSION);
+        assert_eq!(negotiate_protocol(None), PROTOCOL_VERSION);
     }
 }
 
@@ -399,6 +489,7 @@ async fn handle_connection<R, W>(
     mut reader: BufReader<R>,
     mut writer: W,
     host: Arc<McpHost>,
+    require_mcp_token: bool,
 ) -> Result<(), String>
 where
     R: AsyncRead + Unpin,
@@ -436,6 +527,10 @@ where
         let mut content_length = 0usize;
         let mut accept = String::new();
         let mut connection = String::new();
+        let mut content_type = String::new();
+        let mut origin = String::new();
+        let mut host_header = String::new();
+        let mut mcp_session_id = String::new();
         for line in lines {
             let Some((k, v)) = line.split_once(':') else {
                 continue;
@@ -448,6 +543,14 @@ where
                 accept = v.to_string();
             } else if k.eq_ignore_ascii_case("connection") {
                 connection = v.to_string();
+            } else if k.eq_ignore_ascii_case("content-type") {
+                content_type = v.to_string();
+            } else if k.eq_ignore_ascii_case("origin") {
+                origin = v.to_string();
+            } else if k.eq_ignore_ascii_case("host") {
+                host_header = v.to_string();
+            } else if k.eq_ignore_ascii_case("mcp-session-id") {
+                mcp_session_id = v.to_string();
             }
         }
         let keep = if connection.eq_ignore_ascii_case("close") {
@@ -471,6 +574,10 @@ where
         }
 
         let path_only = path.split('?').next().unwrap_or(path);
+        if !host_header.is_empty() && !security::is_loopback_host(&host_header) {
+            write_http(&mut writer, 403, "text/plain", b"forbidden host", false).await?;
+            return Ok(());
+        }
         if method == "GET" && (path_only == "/health" || path_only == "/healthz") {
             write_http(&mut writer, 200, "text/plain", b"ok", keep).await?;
             if !keep {
@@ -481,14 +588,25 @@ where
         if path_only == "/.well-known/oauth-protected-resource"
             || path_only == "/.well-known/oauth-protected-resource/mcp"
         {
-            write_http(
-                &mut writer,
-                200,
-                "application/json",
-                br#"{"resource":"http://127.0.0.1:8787/mcp"}"#,
-                keep,
-            )
-            .await?;
+            if require_mcp_token {
+                write_http(
+                    &mut writer,
+                    404,
+                    "application/json",
+                    br#"{"error":"not_found"}"#,
+                    keep,
+                )
+                .await?;
+            } else {
+                write_http(
+                    &mut writer,
+                    200,
+                    "application/json",
+                    br#"{"resource":"http://127.0.0.1:8787/mcp"}"#,
+                    keep,
+                )
+                .await?;
+            }
             if !keep {
                 return Ok(());
             }
@@ -510,6 +628,23 @@ where
             }
             continue;
         }
+        if method == "POST" && path_only.starts_with("/api/") {
+            let json_body = content_type
+                .split(';')
+                .next()
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"));
+            if !json_body
+                || (!origin.is_empty()
+                    && !security::is_same_loopback_origin(&origin, &host_header))
+            {
+                write_http(&mut writer, 403, "application/json", br#"{"error":"forbidden"}"#, keep)
+                    .await?;
+                if !keep {
+                    return Ok(());
+                }
+                continue;
+            }
+        }
         if let Some((status, ctype, payload)) = ui::route(method, path_only, &body) {
             write_http(&mut writer, status, ctype, &payload, keep).await?;
             if !keep {
@@ -517,28 +652,141 @@ where
             }
             continue;
         }
-        if method != "POST" || path_only != "/mcp" {
+        let valid_mcp_path = if require_mcp_token {
+            match security::matches_mcp_tcp_path(path_only) {
+                Ok(valid) => valid,
+                Err(e) => {
+                    eprintln!("mcp auth: {e}");
+                    false
+                }
+            }
+        } else {
+            path_only == "/mcp"
+        };
+        if !matches!(method, "POST" | "DELETE") || !valid_mcp_path {
             write_http(&mut writer, 404, "text/plain", b"not found", keep).await?;
             if !keep {
                 return Ok(());
             }
             continue;
         }
-        let resp = match serde_json::from_slice::<Value>(&body) {
-            Ok(msg) => host
-                .handle_rpc(msg)
-                .await
-                .unwrap_or_else(|| json!({"jsonrpc": "2.0", "id": null, "result": {}})),
-            Err(e) => rpc_error(Value::Null, -32700, format!("parse error: {e}")),
+        if method == "DELETE" {
+            let status = if mcp_session_id.is_empty() {
+                400
+            } else if host.end_http_session(&mcp_session_id).await {
+                204
+            } else {
+                404
+            };
+            write_http(&mut writer, status, "text/plain", b"", keep).await?;
+            if !keep {
+                return Ok(());
+            }
+            continue;
+        }
+
+        let json_body = content_type
+            .split(';')
+            .next()
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"));
+        if !json_body {
+            write_http(
+                &mut writer,
+                415,
+                "application/json",
+                br#"{"error":"content_type_must_be_application_json"}"#,
+                keep,
+            )
+            .await?;
+            if !keep {
+                return Ok(());
+            }
+            continue;
+        }
+
+        let msg = match serde_json::from_slice::<Value>(&body) {
+            Ok(msg) => msg,
+            Err(e) => {
+                let resp = rpc_error(Value::Null, -32700, format!("parse error: {e}"));
+                let payload = serde_json::to_vec(&resp).map_err(|e| e.to_string())?;
+                write_http(&mut writer, 400, "application/json", &payload, keep).await?;
+                if !keep {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+        let is_initialize = msg.get("method").and_then(Value::as_str) == Some("initialize");
+        let (session, new_session_id) = if is_initialize {
+            let (id, session) = host.begin_http_session().await?;
+            (session, Some(id))
+        } else if !mcp_session_id.is_empty() {
+            let Some(session) = host.http_session(&mcp_session_id).await else {
+                write_http(&mut writer, 404, "text/plain", b"unknown MCP session", keep).await?;
+                if !keep {
+                    return Ok(());
+                }
+                continue;
+            };
+            (session, None)
+        } else {
+            write_http(
+                &mut writer,
+                400,
+                "application/json",
+                br#"{"error":"missing_mcp_session_id"}"#,
+                keep,
+            )
+            .await?;
+            if !keep {
+                return Ok(());
+            }
+            continue;
+        };
+
+        let Some(resp) = host.handle_rpc(&session, msg).await else {
+            write_http_with_headers(
+                &mut writer,
+                202,
+                "application/json",
+                b"",
+                keep,
+                &[],
+            )
+            .await?;
+            if !keep {
+                return Ok(());
+            }
+            continue;
         };
         let payload = serde_json::to_vec(&resp).map_err(|e| e.to_string())?;
+        let response_headers = new_session_id
+            .as_deref()
+            .map(|id| vec![("Mcp-Session-Id", id)])
+            .unwrap_or_default();
         if accept.contains("text/event-stream") && !accept.contains("application/json") {
             let mut sse = Vec::from("event: message\ndata: ");
             sse.extend_from_slice(&payload);
             sse.extend_from_slice(b"\n\n");
-            write_http(&mut writer, 200, "text/event-stream", &sse, keep).await?;
+            write_http_with_headers(
+                &mut writer,
+                200,
+                "text/event-stream",
+                &sse,
+                keep,
+                &response_headers,
+            )
+            .await?;
         } else {
-            write_http(&mut writer, 200, "application/json", &payload, keep).await?;
+            write_http_with_headers(
+                &mut writer,
+                200,
+                "application/json",
+                &payload,
+                keep,
+                &response_headers,
+            )
+            .await?;
         }
         if !keep {
             return Ok(());
@@ -553,11 +801,26 @@ async fn write_http<W: AsyncWrite + Unpin>(
     body: &[u8],
     keep_alive: bool,
 ) -> Result<(), String> {
+    write_http_with_headers(writer, status, content_type, body, keep_alive, &[]).await
+}
+
+async fn write_http_with_headers<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    keep_alive: bool,
+    extra_headers: &[(&str, &str)],
+) -> Result<(), String> {
     let reason = match status {
         200 => "OK",
+        202 => "Accepted",
+        204 => "No Content",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
         431 => "Request Header Fields Too Large",
         _ => "Error",
     };
@@ -566,10 +829,21 @@ async fn write_http<W: AsyncWrite + Unpin>(
     } else {
         "close"
     };
-    let header = format!(
+    let mut header = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: {conn}\r\n\r\n",
         body.len()
     );
+    if !extra_headers.is_empty() {
+        let suffix = "\r\n";
+        header.truncate(header.len() - suffix.len());
+        for (name, value) in extra_headers {
+            header.push_str(name);
+            header.push_str(": ");
+            header.push_str(value);
+            header.push_str("\r\n");
+        }
+        header.push_str("\r\n");
+    }
     let mut buf = Vec::with_capacity(header.len() + body.len());
     buf.extend_from_slice(header.as_bytes());
     buf.extend_from_slice(body);

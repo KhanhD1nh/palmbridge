@@ -61,7 +61,7 @@ jobs:
 
       - name: Clippy
         working-directory: .grok-build
-        run: cargo clippy -p palmbridge --all-targets
+        run: cargo clippy -p palmbridge --all-targets --no-deps -- -D warnings
 
       - name: Build
         working-directory: .grok-build

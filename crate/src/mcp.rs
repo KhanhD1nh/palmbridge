@@ -25,8 +25,10 @@ use crate::ui;
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "Palmbridge";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
-const SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-const MAX_HTTP_SESSIONS: usize = 256;
+// Each HTTP MCP session owns an LSP manager. Rust Analyzer can index gigabytes,
+// so keep one short-lived session; configured LSP servers remain available.
+const SESSION_TTL: Duration = Duration::from_secs(2 * 60);
+const MAX_HTTP_SESSIONS: usize = 1;
 
 fn negotiate_protocol(requested: Option<&str>) -> &'static str {
     match requested {

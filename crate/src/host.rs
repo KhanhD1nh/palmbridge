@@ -297,20 +297,6 @@ fn add_auto_detected_lsp_servers(cwd: &Path, servers: &mut BTreeMap<String, LspS
         );
     }
 
-    if !claimed(".rs", servers)
-        && let Some((command, args)) = find_language_server(cwd, "rust-analyzer")
-    {
-        servers.insert(
-            "rust".into(),
-            LspServerConfig {
-                command,
-                args,
-                extensions: HashMap::from([(".rs".into(), "rust".into())]),
-                restart_on_crash: Some(true),
-                ..Default::default()
-            },
-        );
-    }
 
     if !claimed(".py", servers)
         && let Some((command, mut args)) = find_language_server(cwd, "pyright-langserver")

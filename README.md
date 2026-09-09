@@ -293,7 +293,7 @@ For unattended edits, select **Always allow** on the first write, or set **Setti
 | `run_terminal_cmd` | Run commands and tests |
 | `get_task_output`, `kill_task` | Manage background commands |
 
-LSP detects `.grok/lsp.json`, project `node_modules/.bin`, npm-global language servers, and `rust-analyzer`. Browser inspection supports Chrome, Brave, Edge, and Chromium. `browser start` creates a persistent local profile for authenticated localhost development.
+LSP reads explicit `.grok/lsp.json` server definitions plus project `node_modules/.bin` and npm-global language servers. Rust Analyzer is opt-in through `.grok/lsp.json`; automatic Rust workspace indexing can use several GB of RAM. Browser inspection supports Chrome, Brave, Edge, and Chromium. `browser start` creates a persistent local profile for authenticated localhost development.
 
 ## Troubleshooting
 

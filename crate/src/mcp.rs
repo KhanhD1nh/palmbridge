@@ -25,10 +25,10 @@ use crate::ui;
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "Graft";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
-// Each HTTP MCP session owns an LSP manager. Rust Analyzer can index gigabytes,
-// so keep one short-lived session; configured LSP servers remain available.
-const SESSION_TTL: Duration = Duration::from_secs(2 * 60);
-const MAX_HTTP_SESSIONS: usize = 1;
+// Keep reconnecting ChatGPT clients from exhausting session capacity. LSP
+// remains opt-in per session, so MCP handshakes must not be globally throttled.
+const SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_HTTP_SESSIONS: usize = 256;
 
 fn negotiate_protocol(requested: Option<&str>) -> &'static str {
     match requested {
@@ -295,10 +295,26 @@ impl McpHost {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
 
         let result = match method {
-            "initialize" => Ok(self.initialize(session, params)),
+            "initialize" => Ok(self.initialize(session, params.clone())),
             "ping" => Ok(json!({})),
+            "server/discover" => Ok(json!({
+                "supportedVersions": ["2026-07-28"],
+                "capabilities": plugin::initialize_capabilities(),
+                "instructions": plugin::initialize_instructions(
+                    &self.workspace(session).display().to_string()
+                ),
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "name": SERVER_NAME,
+                        "version": SERVER_VERSION,
+                    }
+                },
+                "ttlMs": 0,
+                "cacheScope": "private",
+                "resultType": "complete",
+            })),
             "tools/list" => self.tools_list(session).await,
-            "tools/call" => self.tools_call(session, params).await,
+            "tools/call" => self.tools_call(session, params.clone()).await,
             "skills/list" => Ok(plugin::skills_list()),
             "skills/get" => plugin::skills_get(&params),
             "resources/list" => Ok(plugin::resources_list()),
@@ -311,7 +327,16 @@ impl McpHost {
         };
 
         Some(match result {
-            Ok(value) => json!({"jsonrpc": "2.0", "id": id, "result": value}),
+            Ok(mut value) => {
+                if params
+                    .pointer("/_meta/io.modelcontextprotocol~1protocolVersion")
+                    .and_then(Value::as_str)
+                    .is_some_and(|version| version >= "2026-07-28")
+                {
+                    value["resultType"] = Value::String("complete".into());
+                }
+                json!({"jsonrpc": "2.0", "id": id, "result": value})
+            }
             Err((code, message, data)) => rpc_error_with_data(id, code, message, data),
         })
     }
@@ -682,10 +707,23 @@ where
                 continue;
             }
         };
-        let is_initialize = msg.get("method").and_then(Value::as_str) == Some("initialize");
-        let (session, new_session_id) = if is_initialize {
+        let method = msg.get("method").and_then(Value::as_str);
+        let (session, new_session_id) = if method == Some("initialize") {
             let (id, session) = host.begin_http_session().await?;
             (session, Some(id))
+        } else if method == Some("server/discover") {
+            // tunnel-client discovers before initialize. Do not attach a
+            // session header here: it treats discovery as stateless.
+            (Arc::clone(&host.default), None)
+        } else if mcp_session_id.is_empty()
+            && msg
+                .pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+                .and_then(Value::as_str)
+                .is_some_and(|version| version >= "2026-07-28")
+        {
+            // MCP 2026-07-28 is stateless: each request includes the protocol
+            // version and client capabilities in params._meta.
+            (Arc::clone(&host.default), None)
         } else if !mcp_session_id.is_empty() {
             let Some(session) = host.http_session(&mcp_session_id).await else {
                 write_http(&mut writer, 404, "text/plain", b"unknown MCP session", keep).await?;

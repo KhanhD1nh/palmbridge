@@ -367,7 +367,18 @@ mcp:
 {mcp_server}"#
     );
     crate::state::atomic_write_private(&path, yaml)
-        .map_err(|e| format!("write {}: {e}", path.display()))
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    #[cfg(windows)]
+    {
+        let legacy_dir = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".config/tunnel-client");
+        fs::create_dir_all(&legacy_dir)
+            .map_err(|e| format!("mkdir {}: {e}", legacy_dir.display()))?;
+        fs::copy(&path, legacy_dir.join(format!("{PROFILE}.yaml")))
+            .map_err(|e| format!("copy Windows tunnel profile: {e}"))?;
+    }
+    Ok(())
 }
 
 fn wrapper_path() -> PathBuf {
@@ -1060,7 +1071,6 @@ fn spawn_tunnel_process() -> Result<u32, String> {
             "run",
             "--profile",
             PROFILE,
-            "--log.level=warn",
             "--control-plane.poll-timeout=60s",
         ])
         .stdin(Stdio::null())

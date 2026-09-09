@@ -95,6 +95,9 @@ fn parse_args() -> Result<(PathBuf, Cmd), String> {
             [op] if op == "mcp" => Cmd::McpStdio,
             [op] if op == "setup" => Cmd::Setup { open_ui: open },
             [op] if op == "config" => Cmd::Config { addr, open },
+            [op, flag] if op == "config" && (flag == "--open" || flag == "--ui") => {
+                Cmd::Config { addr, open: true }
+            }
             [op] if op == "watch" => Cmd::Watch,
             [op] if op == "use" => Cmd::Use {
                 dir: fallback.clone(),

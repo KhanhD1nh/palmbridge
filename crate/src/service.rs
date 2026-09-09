@@ -333,13 +333,10 @@ fn write_profile(key: &Path, tunnel_id: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let mut key_path = key.display().to_string();
-    // YAML double-quoted scalars treat backslashes as escapes ("\U" → unicode).
-    // Windows paths must use forward slashes (accepted by Go and Command::new).
     #[cfg(windows)]
-    {
-        key_path = key_path.replace('\\', "/");
-    }
+    let key_path = key.display().to_string().replace('\\', "/");
+    #[cfg(not(windows))]
+    let key_path = key.display().to_string();
     #[cfg(windows)]
     let mcp_server = format!("    - channel: main\n      url: \"{MCP_BASE}/mcp\"\n");
     #[cfg(not(windows))]

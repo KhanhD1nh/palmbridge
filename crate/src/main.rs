@@ -1,3 +1,5 @@
+#![deny(warnings)]
+
 //! Palmbridge — unofficial ChatGPT plugin. Local coding tools. No model.
 
 mod host;

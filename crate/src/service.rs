@@ -316,6 +316,7 @@ control_plane:
   base_url: "https://api.openai.com"
   tunnel_id: "{tunnel_id}"
   api_key: "file:{key_path}"
+  poll_timeout: 60s
 health:
   listen_addr: "{HEALTH_LISTEN}"
 admin_ui:

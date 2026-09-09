@@ -23,16 +23,19 @@ pub const HEALTH_LISTEN: &str = "127.0.0.1:18780";
 pub const HEALTH_BASE: &str = "http://127.0.0.1:18780";
 pub const MCP_PORT: u16 = 8787;
 pub const MCP_BASE: &str = "http://127.0.0.1:8787";
-pub const PROFILE: &str = "palmbridge";
+pub const PROFILE: &str = "graft";
 #[cfg(target_os = "macos")]
-const LABEL: &str = "dev.palmbridge.tunnel";
+const LABEL: &str = "dev.graft.tunnel";
 #[cfg(target_os = "macos")]
-const MCP_LABEL: &str = "dev.palmbridge.mcp";
+const MCP_LABEL: &str = "dev.graft.mcp";
 #[cfg(target_os = "macos")]
-const WATCH_LABEL: &str = "dev.palmbridge.watch";
+const WATCH_LABEL: &str = "dev.graft.watch";
 #[cfg(target_os = "macos")]
-const LEGACY_LABELS: &[&str] = &["dev.hands.tunnel", "ai.grok.harness.tunnel"];
-const LEGACY_PROFILES: &[&str] = &["hands", "grok-harness"];
+const LEGACY_LABELS: &[&str] = &[
+    "dev.palmbridge.tunnel", "dev.palmbridge.mcp", "dev.palmbridge.watch",
+    "dev.hands.tunnel", "ai.grok.harness.tunnel",
+];
+const LEGACY_PROFILES: &[&str] = &["palmbridge", "hands", "grok-harness"];
 
 pub fn profile_file() -> PathBuf {
     host::tunnel_client_dir().join(format!("{PROFILE}.yaml"))
@@ -106,7 +109,7 @@ pub fn status_line() -> String {
     let svc = if installed() {
         "enabled (login + restart)"
     } else {
-        "off — palmbridge setup"
+        "off — graft setup"
     };
     format!("{health}\nservice    {svc}")
 }
@@ -140,7 +143,7 @@ pub fn enable() -> Result<(), String> {
     install_supervisor()?;
     let _ = install_watch();
     if wait_mcp(Duration::from_secs(8)) && wait_ready(Duration::from_secs(15)) {
-        eprintln!("tunnel on. login start + restart. config: palmbridge config");
+        eprintln!("tunnel on. login start + restart. config: graft config");
         eprintln!("admin  {HEALTH_BASE}/ui");
         Ok(())
     } else {
@@ -166,7 +169,7 @@ pub fn enable() -> Result<(), String> {
     install_supervisor()?;
     let _ = install_watch();
     if wait_ready(Duration::from_secs(15)) {
-        eprintln!("tunnel on. login start + restart. config: palmbridge config");
+        eprintln!("tunnel on. login start + restart. config: graft config");
         eprintln!("admin  {HEALTH_BASE}/ui");
         Ok(())
     } else {
@@ -288,7 +291,7 @@ fn can_enable() -> bool {
 
 fn persist_key() -> Result<PathBuf, String> {
     let k = crate::secrets::get().ok_or_else(|| {
-        "missing runtime key. run palmbridge setup, or export CONTROL_PLANE_API_KEY".to_string()
+        "missing runtime key. run graft setup, or export CONTROL_PLANE_API_KEY".to_string()
     })?;
     crate::secrets::ensure_file(&k)
 }
@@ -315,7 +318,7 @@ fn resolve_tunnel_id() -> Result<String, String> {
             return Ok(id);
         }
     }
-    Err("missing tunnel id. paste it in the config UI (palmbridge config) or export CONTROL_PLANE_TUNNEL_ID".into())
+    Err("missing tunnel id. paste it in the config UI (graft config) or export CONTROL_PLANE_TUNNEL_ID".into())
 }
 
 fn read_tunnel_id(path: &Path) -> Option<String> {
@@ -402,7 +405,7 @@ set -- "$CLIENT" run --profile {PROFILE} --log.level=warn --control-plane.poll-t
   --mcp.server-url "url=http://127.0.0.1/mcp,channel=main,unix-socket=$SOCK"
 # -is always. macOS ignores -s on battery; watch kickstarts on AC so -s
 # is taken while plugged in. Frozen -i from a battery start allowed lid-sleep.
-mode="${{PALMBRIDGE_CAFFEINATE:-${{HANDS_CAFFEINATE:-${{GROK_HARNESS_CAFFEINATE:-is}}}}}}"
+mode="${{GRAFT_CAFFEINATE:-${{PALMBRIDGE_CAFFEINATE:-${{HANDS_CAFFEINATE:-${{GROK_HARNESS_CAFFEINATE:-is}}}}}}}}"
 if [ "$mode" = "auto" ]; then
   mode=is
 fi
@@ -410,7 +413,7 @@ if [ -x /usr/bin/caffeinate ] && [ "$mode" != "off" ]; then
   exec /usr/bin/caffeinate -"$mode" -- "$@"
 fi
 if command -v systemd-inhibit >/dev/null 2>&1; then
-  exec systemd-inhibit --what=idle --who=palmbridge --why="ChatGPT MCP tunnel" --mode=block "$@"
+  exec systemd-inhibit --what=idle --who=graft --why="ChatGPT MCP tunnel" --mode=block "$@"
 fi
 exec "$@"
 "#,
@@ -428,7 +431,7 @@ exec "$@"
 
 fn harness_bin() -> Result<PathBuf, String> {
     if let Some(home) = dirs::home_dir() {
-        let local = home.join(".local/bin/palmbridge");
+        let local = home.join(".local/bin/graft");
         if local.is_file() {
             return Ok(dunce::canonicalize(&local).unwrap_or(local));
         }
@@ -635,7 +638,7 @@ fn mcp_plist_path() -> PathBuf {
 
 #[cfg(target_os = "macos")]
 fn install_mcp() -> Result<(), String> {
-    let palmbridge = harness_bin()?;
+    let graft = harness_bin()?;
     let plist = mcp_plist_path();
     if let Some(parent) = plist.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -664,7 +667,7 @@ fn install_mcp() -> Result<(), String> {
 </dict>
 </plist>
 "#,
-        xml_escape(&palmbridge.display().to_string()),
+        xml_escape(&graft.display().to_string()),
         xml_escape(&out.display().to_string()),
         xml_escape(&err.display().to_string()),
     );
@@ -698,7 +701,7 @@ fn watch_plist_path() -> PathBuf {
 
 #[cfg(target_os = "macos")]
 fn install_watch() -> Result<(), String> {
-    let palmbridge = harness_bin()?;
+    let graft = harness_bin()?;
     let plist = watch_plist_path();
     if let Some(parent) = plist.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -725,7 +728,7 @@ fn install_watch() -> Result<(), String> {
 </dict>
 </plist>
 "#,
-        xml_escape(&palmbridge.display().to_string()),
+        xml_escape(&graft.display().to_string()),
         xml_escape(&out.display().to_string()),
         xml_escape(&err.display().to_string()),
     );
@@ -751,175 +754,72 @@ fn uninstall_watch() -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn unit_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/systemd/user/palmbridge-tunnel.service")
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config/systemd/user/graft-tunnel.service")
 }
 
 #[cfg(target_os = "linux")]
 fn install_supervisor() -> Result<(), String> {
     let unit = unit_path();
-    if let Some(parent) = unit.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    }
-    let wrapper_buf = wrapper_path();
-    let wrapper = systemd_exec_path(&wrapper_buf);
-    let body = format!(
-        r#"[Unit]
-Description=Palmbridge ChatGPT tunnel
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart={wrapper}
-Restart=always
-RestartSec=2
-Nice=0
-
-[Install]
-WantedBy=default.target
-"#
-    );
+    if let Some(parent) = unit.parent() { fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?; }
+    let body = format!("[Unit]\nDescription=Graft ChatGPT tunnel\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={}\nRestart=always\nRestartSec=2\nNice=0\n\n[Install]\nWantedBy=default.target\n", systemd_exec_path(&wrapper_path()));
     fs::write(&unit, body).map_err(|e| format!("write {}: {e}", unit.display()))?;
-    stop_unmanaged();
-    for legacy in ["hands-tunnel.service", "grok-harness-tunnel.service"] {
-        let _ = Command::new("systemctl")
-            .args(["--user", "disable", "--now", legacy])
-            .status();
-    }
+    for legacy in ["palmbridge-tunnel.service", "palmbridge-mcp.service", "palmbridge-watch.service", "hands-tunnel.service", "grok-harness-tunnel.service"] { let _ = Command::new("systemctl").args(["--user", "disable", "--now", legacy]).status(); }
     run_ok("systemctl", &["--user", "daemon-reload"])?;
-    run_ok("systemctl", &["--user", "enable", "--now", "palmbridge-tunnel.service"])?;
+    run_ok("systemctl", &["--user", "enable", "--now", "graft-tunnel.service"])?;
     let _ = install_watch();
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn mcp_unit_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/systemd/user/palmbridge-mcp.service")
-}
+fn mcp_unit_path() -> PathBuf { dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config/systemd/user/graft-mcp.service") }
 
 #[cfg(target_os = "linux")]
 fn install_mcp() -> Result<(), String> {
-    let palmbridge = harness_bin()?;
     let unit = mcp_unit_path();
-    if let Some(parent) = unit.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    }
-    let body = format!(
-        r#"[Unit]
-Description=Palmbridge MCP HTTP
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStart={bin} --http --port 8787
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-"#,
-        bin = systemd_exec_path(&palmbridge)
-    );
+    if let Some(parent) = unit.parent() { fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?; }
+    let body = format!("[Unit]\nDescription=Graft MCP HTTP\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart={} --http --port 8787\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n", systemd_exec_path(&harness_bin()?));
     fs::write(&unit, body).map_err(|e| format!("write {}: {e}", unit.display()))?;
     run_ok("systemctl", &["--user", "daemon-reload"])?;
-    run_ok("systemctl", &["--user", "enable", "--now", "palmbridge-mcp.service"])?;
-    Ok(())
+    run_ok("systemctl", &["--user", "enable", "--now", "graft-mcp.service"])
 }
 
 #[cfg(target_os = "linux")]
 fn uninstall_mcp() -> Result<(), String> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", "palmbridge-mcp.service"])
-        .status();
-    let unit = mcp_unit_path();
-    if unit.exists() {
-        fs::remove_file(&unit).map_err(|e| format!("rm {}: {e}", unit.display()))?;
-    }
-    Ok(())
+    let _ = Command::new("systemctl").args(["--user", "disable", "--now", "graft-mcp.service"]).status();
+    let unit = mcp_unit_path(); if unit.exists() { fs::remove_file(&unit).map_err(|e| format!("rm {}: {e}", unit.display()))?; } Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn watch_unit_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/systemd/user/palmbridge-watch.service")
-}
+fn watch_unit_path() -> PathBuf { dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config/systemd/user/graft-watch.service") }
 
 #[cfg(target_os = "linux")]
 fn install_watch() -> Result<(), String> {
-    let palmbridge = harness_bin()?;
     let unit = watch_unit_path();
-    if let Some(parent) = unit.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    }
-    let body = format!(
-        r#"[Unit]
-Description=Palmbridge tunnel down notifier
-After=palmbridge-tunnel.service
-
-[Service]
-Type=simple
-ExecStart={} watch
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-"#,
-        systemd_exec_path(&palmbridge)
-    );
+    if let Some(parent) = unit.parent() { fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?; }
+    let body = format!("[Unit]\nDescription=Graft tunnel down notifier\nAfter=graft-tunnel.service\n\n[Service]\nType=simple\nExecStart={} watch\nRestart=always\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n", systemd_exec_path(&harness_bin()?));
     fs::write(&unit, body).map_err(|e| format!("write {}: {e}", unit.display()))?;
     run_ok("systemctl", &["--user", "daemon-reload"])?;
-    run_ok("systemctl", &["--user", "enable", "--now", "palmbridge-watch.service"])?;
-    Ok(())
+    run_ok("systemctl", &["--user", "enable", "--now", "graft-watch.service"])
 }
 
 #[cfg(target_os = "linux")]
 fn uninstall_watch() -> Result<(), String> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", "palmbridge-watch.service"])
-        .status();
-    let unit = watch_unit_path();
-    if unit.exists() {
-        fs::remove_file(&unit).map_err(|e| format!("rm {}: {e}", unit.display()))?;
-    }
-    Ok(())
+    let _ = Command::new("systemctl").args(["--user", "disable", "--now", "graft-watch.service"]).status();
+    let unit = watch_unit_path(); if unit.exists() { fs::remove_file(&unit).map_err(|e| format!("rm {}: {e}", unit.display()))?; } Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn start_supervisor() -> Result<(), String> {
-    run_ok("systemctl", &["--user", "start", "palmbridge-tunnel.service"])
-}
+fn start_supervisor() -> Result<(), String> { run_ok("systemctl", &["--user", "start", "graft-tunnel.service"]) }
 
 #[cfg(target_os = "linux")]
-fn stop_supervisor() -> Result<(), String> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "stop", "palmbridge-tunnel.service"])
-        .status();
-    stop_unmanaged();
-    Ok(())
-}
+fn stop_supervisor() -> Result<(), String> { let _ = Command::new("systemctl").args(["--user", "stop", "graft-tunnel.service"]).status(); stop_unmanaged(); Ok(()) }
 
 #[cfg(target_os = "linux")]
 fn uninstall_supervisor() -> Result<(), String> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", "palmbridge-tunnel.service"])
-        .status();
-    let _ = uninstall_watch();
-    let _ = uninstall_mcp();
-    stop_unmanaged();
-    let unit = unit_path();
-    if unit.exists() {
-        fs::remove_file(&unit).map_err(|e| format!("rm {}: {e}", unit.display()))?;
-    }
-    let _ = Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status();
-    Ok(())
+    let _ = Command::new("systemctl").args(["--user", "disable", "--now", "graft-tunnel.service"]).status();
+    let _ = uninstall_watch(); let _ = uninstall_mcp(); stop_unmanaged();
+    let unit = unit_path(); if unit.exists() { fs::remove_file(&unit).map_err(|e| format!("rm {}: {e}", unit.display()))?; }
+    let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status(); Ok(())
 }
 #[cfg(windows)]
 const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -1033,24 +933,21 @@ fn assign_to_supervisor_job(child: &std::process::Child) {
     }
 }
 
-// Windows supervision model: `palmbridge start` launches a detached
-// `palmbridge --supervise` process that owns both children (tunnel-client and
-// MCP HTTP). The supervisor restarts a child that dies or hangs (health probe
-// fails 3 cycles in a row). `palmbridge stop` kills the supervisor tree so
-// nothing respawns mid-stop, then kills strays and removes the PID files.
+// Windows supervision model: `graft start` launches a detached
+// `graft --supervise` process that owns both children and restarts failures.
 #[cfg(windows)]
 fn supervisor_pid_file() -> PathBuf {
-    host::config_dir().join("palmbridge-supervisor.pid")
+    host::config_dir().join("graft-supervisor.pid")
 }
 
 #[cfg(windows)]
 fn tunnel_pid_file() -> PathBuf {
-    host::config_dir().join("palmbridge-tunnel.pid")
+    host::config_dir().join("graft-tunnel.pid")
 }
 
 #[cfg(windows)]
 fn mcp_pid_file() -> PathBuf {
-    host::config_dir().join("palmbridge-mcp.pid")
+    host::config_dir().join("graft-mcp.pid")
 }
 
 #[cfg(windows)]
@@ -1079,7 +976,7 @@ fn install_supervisor() -> Result<(), String> {
 }
 
 #[cfg(windows)]
-#[allow(clippy::disallowed_methods)] // Detached Palmbridge supervisor owns the process tree.
+#[allow(clippy::disallowed_methods)] // Detached Graft supervisor owns the process tree.
 fn start_supervisor() -> Result<(), String> {
     // Idempotent: reuse a healthy supervisor if one is already running.
     if let Ok(pid) = fs::read_to_string(supervisor_pid_file())
@@ -1120,74 +1017,32 @@ fn uninstall_supervisor() -> Result<(), String> {
     stop_supervisor()
 }
 
-/// Entry point for `palmbridge --supervise` (detached, long-lived).
+/// Entry point for `graft --supervise` (detached, long-lived).
 #[cfg(windows)]
 pub fn supervise() {
-    // Write our own PID so `palmbridge stop` can kill the tree. Doing this
-    // inside the supervisor avoids a race with the parent CLI writing it.
     let _ = crate::state::atomic_write(&supervisor_pid_file(), std::process::id().to_string());
-    if let Err(e) = supervisor_job() {
-        watchdog_log(&format!("warning: could not create kill-on-close job: {e}"));
-    }
+    if let Err(e) = supervisor_job() { watchdog_log(&format!("warning: could not create kill-on-close job: {e}")); }
     watchdog_log("supervisor started");
     let mcp = std::thread::spawn(|| babysit("MCP HTTP", mcp_pid_file(), spawn_mcp_process, mcp_ready));
     babysit("tunnel-client", tunnel_pid_file(), spawn_tunnel_process, ready);
     let _ = mcp.join();
 }
 
-/// Watch one child: respawn on death, missing PID file, or after 3
-/// consecutive failed health probes (a hung-but-alive process). Exits when
-/// the supervisor PID file disappears (i.e. `palmbridge stop`).
 #[cfg(windows)]
-fn babysit(
-    name: &str,
-    pid_file: PathBuf,
-    respawn: fn() -> Result<u32, String>,
-    healthy: fn() -> bool,
-) {
-    let mut misses: u32 = 0;
-    let mut first = true;
+fn babysit(name: &str, pid_file: PathBuf, respawn: fn() -> Result<u32, String>, healthy: fn() -> bool) {
+    let mut misses = 0;
     loop {
-        // Probe immediately on entry; afterwards wait 5s between cycles.
-        if !first {
-            std::thread::sleep(Duration::from_secs(5));
-        }
-        first = false;
-        // Stop signal: `palmbridge stop` removes the supervisor PID file.
-        if !supervisor_pid_file().exists() {
-            watchdog_log(&format!("supervisor pid file removed, {name} babysit exiting"));
-            return;
-        }
-        let pid = fs::read_to_string(&pid_file)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok());
+        std::thread::sleep(Duration::from_secs(5));
+        if !supervisor_pid_file().exists() { watchdog_log(&format!("supervisor pid file removed, {name} babysit exiting")); return; }
+        let pid = fs::read_to_string(&pid_file).ok().and_then(|s| s.trim().parse::<u32>().ok());
         match pid {
-            Some(pid) if process_alive(pid) => {
-                if healthy() {
-                    misses = 0;
-                    continue;
-                }
-                misses += 1;
-                if misses < 3 {
-                    continue; // transient health blip
-                }
-                watchdog_log(&format!("{name} {pid} hung (health failed {misses}x), killing"));
-            }
-            Some(pid) => {
-                watchdog_log(&format!("{name} {pid} died"));
-            }
-            None => {
-                watchdog_log(&format!("{name} pid file missing or corrupt, respawning"));
-            }
+            Some(pid) if process_alive(pid) && healthy() => { misses = 0; continue; }
+            Some(pid) if process_alive(pid) => { misses += 1; if misses < 3 { continue; } watchdog_log(&format!("{name} {pid} hung (health failed {misses}x), killing")); kill_pid_str(&pid.to_string()); }
+            Some(pid) => watchdog_log(&format!("{name} {pid} died")),
+            None => watchdog_log(&format!("{name} pid file missing or corrupt, respawning")),
         }
         misses = 0;
-        match respawn() {
-            Ok(new) => watchdog_log(&format!("{name} restarted as {new}")),
-            Err(e) => {
-                watchdog_log(&format!("{name} respawn failed: {e}"));
-                std::thread::sleep(Duration::from_secs(5));
-            }
-        }
+        match respawn() { Ok(new) => watchdog_log(&format!("{name} restarted as {new}")), Err(e) => { watchdog_log(&format!("{name} respawn failed: {e}")); std::thread::sleep(Duration::from_secs(5)); } }
     }
 }
 
@@ -1391,7 +1246,7 @@ fn stop_unmanaged() {
         if !cmd.contains("tunnel-client") {
             continue;
         }
-        let ours = cmd.contains("run --profile palmbridge") || LEGACY_PROFILES.iter().any(|profile| cmd.contains(&format!("run --profile {profile}")));
+        let ours = cmd.contains("run --profile graft") || LEGACY_PROFILES.iter().any(|profile| cmd.contains(&format!("run --profile {profile}")));
         if !ours || cmd.contains("pkill") {
             continue;
         }

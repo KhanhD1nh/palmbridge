@@ -23,7 +23,7 @@ use crate::security;
 use crate::ui;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
-const SERVER_NAME: &str = "Palmbridge";
+const SERVER_NAME: &str = "Graft";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 // Each HTTP MCP session owns an LSP manager. Rust Analyzer can index gigabytes,
 // so keep one short-lived session; configured LSP servers remain available.
@@ -160,8 +160,7 @@ impl McpHost {
     fn fresh_session_state(&self) -> Arc<SessionState> {
         Arc::new(SessionState {
             // The persisted pin is a default for *new* sessions. Re-resolve it
-            // here so `palmbridge use` takes effect without disrupting sessions
-            // that are already active on another repository.
+            // here so `graft use` takes effect without disrupting sessions
             workspace: RwLock::new(host::resolve_workspace(&self.fallback_cwd)),
             cached: Mutex::new(None),
         })
@@ -272,7 +271,7 @@ impl McpHost {
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| format!("bind {addr}: {e}"))?;
-        eprintln!("Palmbridge UI  http://{addr}/");
+        eprintln!("Graft UI  http://{addr}/");
         eprintln!("MCP       http://{addr}/mcp");
         loop {
             let (stream, _) = listener
@@ -343,7 +342,7 @@ impl McpHost {
             ),
             plugin::tool_descriptor(
                 "set_workspace",
-                "Use this when the user wants another repo, including while they are not at the machine. Switches the current Palmbridge server session without changing the persisted default. Accepts an absolute path, ~/path, or a short name resolved under ~/Dev (e.g. bunko).",
+                "Use this when the user wants another repo, including while they are not at the machine. Switches the current Graft server session without changing the persisted default. Accepts an absolute path, ~/path, or a short name resolved under ~/Dev (e.g. bunko).",
                 json!({
                     "type": "object",
                     "properties": {
@@ -389,7 +388,7 @@ impl McpHost {
                 Ok(cwd) => Ok(json!({
                     "content": [{
                         "type": "text",
-                        "text": format!("workspace switched for this Palmbridge server session: {}\nThe persisted default workspace was not changed.", cwd.display())
+                        "text": format!("workspace switched for this Graft server session: {}\nThe persisted default workspace was not changed.", cwd.display())
                     }],
                     "structuredContent": {
                         "workspace": cwd.display().to_string()

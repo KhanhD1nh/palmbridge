@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Remove Palmbridge binaries and managed local services. Keeps credentials and build cache.
+# Remove Graft binaries and managed local services. Keeps credentials and build cache.
 set -euo pipefail
 
 PREFIX="${PREFIX:-$HOME/.local}"
 
-if command -v palmbridge >/dev/null 2>&1; then
-  palmbridge disable || true
+if command -v graft >/dev/null 2>&1; then
+  graft disable || true
+elif command -v palmbridge >/dev/null 2>&1; then
+  palmbridge disable || true # Legacy cleanup.
 fi
 
-rm -f "$PREFIX/bin/palmbridge"
-echo "removed $PREFIX/bin/palmbridge"
-echo "kept configuration and cache; remove ~/.config/palmbridge and ~/.cache/palmbridge manually to purge them"
+rm -f "$PREFIX/bin/graft" "$PREFIX/bin/palmbridge"
+echo "removed Graft from $PREFIX/bin"
+echo "kept configuration and cache; remove ~/.config/graft and ~/.cache/graft manually to purge them"

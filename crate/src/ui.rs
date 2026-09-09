@@ -1,4 +1,4 @@
-//! Local config page for humans. Agents use `palmbridge status --json` / `palmbridge setup`.
+//! Local config page for humans. Agents use `graft status --json` / `graft setup`.
 
 use std::path::{Path, PathBuf};
 

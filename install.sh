@@ -4,7 +4,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
-CACHE="${PALMBRIDGE_CACHE:-${HANDS_CACHE:-${GROK_HARNESS_CACHE:-$HOME/.cache/palmbridge}}}"
+# Legacy cache variables preserve existing source-install caches during migration.
+CACHE="${GRAFT_CACHE:-${PALMBRIDGE_CACHE:-${HANDS_CACHE:-${GROK_HARNESS_CACHE:-$HOME/.cache/graft}}}}"
 GROK_BUILD_URL="${GROK_BUILD_URL:-https://github.com/xai-org/grok-build.git}"
 DEFAULT_GROK_BUILD_REF="$(tr -d '[:space:]' < "$REPO_ROOT/GROK_BUILD_REVISION")"
 GROK_BUILD_REF="${GROK_BUILD_REF:-$DEFAULT_GROK_BUILD_REF}"
@@ -33,30 +34,30 @@ if ! command -v rustup >/dev/null 2>&1; then
 fi
 
 cd "$GROK_BUILD"
-CARGO_ARGS=(build --release -p palmbridge)
+CARGO_ARGS=(build --release -p graft)
 if [[ -n "$JOBS" ]]; then
   CARGO_ARGS+=(-j "$JOBS")
 fi
 cargo "${CARGO_ARGS[@]}"
 
-BIN="$GROK_BUILD/target/release/palmbridge"
-install -m 0755 "$BIN" "$PREFIX/bin/palmbridge"
+BIN="$GROK_BUILD/target/release/graft"
+install -m 0755 "$BIN" "$PREFIX/bin/graft"
 
 echo
-echo "installed $PREFIX/bin/palmbridge"
-"$PREFIX/bin/palmbridge" --version
+echo "installed $PREFIX/bin/graft"
+"$PREFIX/bin/graft" --version
 echo
 
 if [[ -n "${CONTROL_PLANE_API_KEY:-}" && -n "${CONTROL_PLANE_TUNNEL_ID:-}" ]]; then
-  "$PREFIX/bin/palmbridge" setup || true
+  "$PREFIX/bin/graft" setup || true
   echo "tunnel setup attempted (keys found in env)."
 else
   echo "Next:"
   echo "  brew install openai/tools/tunnel-client   # once"
-  echo "  cd /your/repo && palmbridge setup         # TTY checklist, no browser"
+  echo "  cd /your/repo && graft setup         # TTY checklist, no browser"
 fi
 echo
-if ! command -v palmbridge >/dev/null 2>&1; then
+if ! command -v graft >/dev/null 2>&1; then
   echo "Put $PREFIX/bin on PATH, e.g.:"
   echo "  export PATH=\"$PREFIX/bin:\$PATH\""
 fi

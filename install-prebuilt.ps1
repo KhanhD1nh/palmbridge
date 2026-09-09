@@ -1,4 +1,4 @@
-# Palmbridge — install prebuilt Windows binaries from GitHub Releases
+# Graft — install prebuilt Windows binaries from GitHub Releases
 # No Rust, Git, or Build Tools required.
 param(
     [string]$Version = "latest",
@@ -11,24 +11,24 @@ $TC_VERSION = "0.0.14"
 
 New-Item -ItemType Directory -Force -Path "$Prefix\bin" | Out-Null
 
-# --- Download palmbridge.exe ---
+# --- Download graft.exe ---
 if ($Version -eq "latest") {
     $ApiUrl = "https://api.github.com/repos/$REPO/releases/latest"
 } else {
     $ApiUrl = "https://api.github.com/repos/$REPO/releases/tags/$Version"
 }
 Write-Host "Fetching release info from $ApiUrl ..."
-$Release = Invoke-RestMethod -Uri $ApiUrl -Headers @{ "User-Agent" = "palmbridge-installer" }
-$Asset = $Release.assets | Where-Object { $_.name -like "palmbridge-windows-*.exe" } | Select-Object -First 1
+$Release = Invoke-RestMethod -Uri $ApiUrl -Headers @{ "User-Agent" = "graft-installer" }
+$Asset = $Release.assets | Where-Object { $_.name -like "graft-windows-*.exe" } | Select-Object -First 1
 if (-not $Asset) { throw "No Windows asset found in release $($Release.tag_name)" }
 $ChecksumAsset = $Release.assets | Where-Object { $_.name -eq "SHA256SUMS" } | Select-Object -First 1
 if (-not $ChecksumAsset) { throw "Release $($Release.tag_name) has no SHA256SUMS; refusing unverified install" }
 
-$Dest = "$Prefix\bin\palmbridge.exe"
-$Download = "$env:TEMP\palmbridge-$([guid]::NewGuid().ToString('N')).exe"
+$Dest = "$Prefix\bin\graft.exe"
+$Download = "$env:TEMP\graft-$([guid]::NewGuid().ToString('N')).exe"
 Write-Host "Downloading $($Asset.name) ($([math]::Round($Asset.size/1MB,1)) MB)..."
 Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $Download
-$ChecksumFile = "$env:TEMP\palmbridge-SHA256SUMS"
+$ChecksumFile = "$env:TEMP\graft-SHA256SUMS"
 Invoke-WebRequest -Uri $ChecksumAsset.browser_download_url -OutFile $ChecksumFile
 $ChecksumLine = Get-Content $ChecksumFile | Where-Object { $_ -match "\s+$([regex]::Escape($Asset.name))$" } | Select-Object -First 1
 if (-not $ChecksumLine) { throw "No checksum found for $($Asset.name)" }
@@ -40,7 +40,8 @@ Remove-Item $ChecksumFile -Force -ErrorAction SilentlyContinue
 # Only stop the active service after the replacement binary has been fully
 # downloaded and verified. A failed network/checksum step leaves the working
 # installation untouched.
-Get-Process -Name palmbridge, tunnel-client -ErrorAction SilentlyContinue |
+# Stop Graft plus the legacy Palmbridge process before replacing the executable.
+Get-Process -Name graft, palmbridge, tunnel-client -ErrorAction SilentlyContinue |
     ForEach-Object {
         Write-Host "Stopping $($_.Name) (PID $($_.Id))..."
         $_.Kill()
@@ -80,4 +81,4 @@ if ($CurrentPath -notlike "*$BinDir*") {
 
 Write-Host ""
 Write-Host "Installed successfully. Run:"
-Write-Host "  palmbridge setup"
+Write-Host "  graft setup"

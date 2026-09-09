@@ -3,8 +3,8 @@
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const SKILL_MD: &str = include_str!("../skills/palmbridge-code/SKILL.md");
-const SKILL_URI: &str = "skill://palmbridge/palmbridge-code/SKILL.md";
+const SKILL_MD: &str = include_str!("../skills/graft-code/SKILL.md");
+const SKILL_URI: &str = "skill://graft/graft-code/SKILL.md";
 
 pub struct Face {
     pub title: &'static str,
@@ -126,7 +126,7 @@ pub fn face(name: &str) -> Face {
             idempotent: true,
         },
         _ => Face {
-            title: "Palmbridge tool",
+            title: "Graft tool",
             invoking: "Working…",
             invoked: "Done",
             read_only: false,
@@ -169,11 +169,11 @@ pub fn initialize_capabilities() -> Value {
 
 pub fn initialize_instructions(workspace: &str) -> String {
     format!(
-        "Palmbridge: local coding tools, no model. Workspace: {workspace}. \
-         Use skill palmbridge-code. Call workspace_info first; set_workspace switches this \
-         server session only (absolute, ~/…, or name under ~/Dev); `palmbridge use` changes \
+        "Graft: local coding tools, no model. Workspace: {workspace}. \
+         Use skill graft-code. Call workspace_info first; set_workspace switches this \
+         server session only (absolute, ~/…, or name under ~/Dev); `graft use` changes \
          the persisted default. Reads auto-run. File edits are routine. \
-         Shell/kill may confirm unless ChatGPT Apps → Palmbridge → Never ask (or Always allow). \
+         Shell/kill may confirm unless ChatGPT Apps → Graft → Never ask (or Always allow). \
          After edits, rerun the failing check. Long commands: background + get_task_output."
     )
 }
@@ -186,8 +186,8 @@ fn skill_entry() -> Value {
     json!({
         "uri": SKILL_URI,
         "frontmatter": {
-            "name": "palmbridge-code",
-            "description": "Read, edit, and run code on the user's local machine via Palmbridge MCP tools. Use when the user wants to work in a repo, fix a bug, run tests, or switch workspaces on this computer."
+            "name": "graft-code",
+            "description": "Read, edit, and run code on the user's local machine via Graft MCP tools. Use when the user wants to work in a repo, fix a bug, run tests, or switch workspaces on this computer."
         },
         "resources": [{
             "uri": SKILL_URI,
@@ -212,9 +212,9 @@ pub fn resources_list() -> Value {
     json!({
         "resources": [{
             "uri": SKILL_URI,
-            "name": "palmbridge-code",
+            "name": "graft-code",
             "mimeType": "text/markdown",
-            "description": "Palmbridge local coding workflow"
+            "description": "Graft local coding workflow"
         }]
     })
 }

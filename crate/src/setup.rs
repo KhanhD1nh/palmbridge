@@ -1,4 +1,4 @@
-//! First-run checklist. TTY prompts; no browser. Agents use env + PALMBRIDGE_NO_UI.
+//! First-run checklist. TTY prompts; no browser. Agents use env + GRAFT_NO_UI.
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
@@ -17,7 +17,7 @@ pub fn run(dir: &Path) -> Result<(), String> {
     let mut id_ok = service::tunnel_id_opt().is_some();
     let tty = io::stdin().is_terminal();
 
-    eprintln!("Palmbridge setup");
+    eprintln!("Graft setup");
     check("workspace", true, &cwd.display().to_string());
     check(
         "tunnel-client",
@@ -55,7 +55,7 @@ pub fn run(dir: &Path) -> Result<(), String> {
 
     if !key_ok || !id_ok {
         if tty {
-            return Err("need both runtime key and tunnel id. or: palmbridge config --open".into());
+            return Err("need both runtime key and tunnel id. or: graft config --open".into());
         }
         return Err(
             "non-interactive: set CONTROL_PLANE_API_KEY and CONTROL_PLANE_TUNNEL_ID".into(),
@@ -68,7 +68,7 @@ pub fn run(dir: &Path) -> Result<(), String> {
         eprintln!();
         eprintln!("tunnel id (copied): {id}");
         eprintln!("ChatGPT → chatgpt.com/plugins → Developer mode → Tunnel → paste → Scan tools");
-        eprintln!("Skip confirm: first write → Always allow, or Settings → Apps → Palmbridge → Never ask");
+        eprintln!("Skip confirm: first write → Always allow, or Settings → Apps → Graft → Never ask");
     }
     Ok(())
 }

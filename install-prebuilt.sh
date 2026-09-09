@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Palmbridge — install prebuilt binaries from GitHub Releases
+# Graft — install prebuilt binaries from GitHub Releases
 # No Rust, Git, or build tools required.
 set -euo pipefail
 
@@ -18,13 +18,13 @@ case "$ARCH" in
   *) echo "Unsupported arch: $ARCH"; exit 1 ;;
 esac
 
-ASSET="palmbridge-${OS}-${ARCH_TAG}"
+ASSET="graft-${OS}-${ARCH_TAG}"
 if [ "$OS" = "darwin" ] && [ "$ARCH_TAG" = "x86_64" ]; then
   echo "No x86_64 macOS build (only aarch64). Build from source."
   exit 1
 fi
 
-# --- Download palmbridge ---
+# --- Download graft ---
 if [ "$VERSION" = "latest" ]; then
   API_URL="https://api.github.com/repos/$REPO/releases/latest"
 else
@@ -63,14 +63,20 @@ if [ "$ACTUAL" != "$EXPECTED" ]; then
   echo "SHA-256 mismatch for $ASSET"
   exit 1
 fi
-mv "$PB_TMP" "$BIN/palmbridge"
-chmod +x "$BIN/palmbridge"
-"$BIN/palmbridge" --version
+if command -v graft >/dev/null 2>&1; then
+  graft stop || true
+fi
+if command -v palmbridge >/dev/null 2>&1; then
+  palmbridge stop || true # Legacy cleanup.
+fi
+mv "$PB_TMP" "$BIN/graft"
+chmod +x "$BIN/graft"
+"$BIN/graft" --version
 
 # --- Install/download tunnel-client ---
 # OpenAI documents Homebrew as the supported macOS install path; directly
 # downloaded release ZIPs are not notarized. Linux uses the signed-release
-# checksum manifest and installs the verified binary into the Palmbridge prefix.
+# checksum manifest and installs the verified binary into the Graft prefix.
 if [ "$OS" = "darwin" ]; then
   if ! command -v tunnel-client >/dev/null 2>&1; then
     if ! command -v brew >/dev/null 2>&1; then
@@ -132,6 +138,6 @@ fi
 
 echo ""
 echo "Installed successfully. Run:"
-echo "  palmbridge setup"
+echo "  graft setup"
 
 </content>

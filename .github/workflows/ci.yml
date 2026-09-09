@@ -57,20 +57,20 @@ jobs:
 
       - name: Test
         working-directory: .grok-build
-        run: cargo test -p palmbridge
+        run: cargo test -p graft
 
       - name: Clippy
         working-directory: .grok-build
-        run: cargo clippy -p palmbridge --all-targets --no-deps
+        run: cargo clippy -p graft --all-targets --no-deps
 
       - name: Build
         working-directory: .grok-build
-        run: cargo build --release -p palmbridge
+        run: cargo build --release -p graft
 
       - name: Smoke
         if: runner.os != 'Windows'
         run: |
-          bin=".grok-build/target/release/palmbridge"
+          bin=".grok-build/target/release/graft"
           "$bin" --version
           "$bin" --help
           "$bin" status --json
@@ -83,11 +83,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $bin = ".grok-build\target\release\palmbridge.exe"
+          $bin = ".grok-build\target\release\graft.exe"
           & $bin --version
           & $bin --help
           & $bin status --json | Out-Null
-          $tmp = Join-Path $env:RUNNER_TEMP "palmbridge-smoke"
+          $tmp = Join-Path $env:RUNNER_TEMP "graft-smoke"
           New-Item -ItemType Directory -Force -Path $tmp | Out-Null
           Set-Content -Path (Join-Path $tmp "n.txt") -Value "hello"
           & $bin use $tmp
@@ -96,8 +96,8 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: palmbridge-${{ runner.os }}-${{ runner.arch }}
+          name: graft-${{ runner.os }}-${{ runner.arch }}
           path: |
-            .grok-build/target/release/palmbridge
-            .grok-build/target/release/palmbridge.exe
+            .grok-build/target/release/graft
+            .grok-build/target/release/graft.exe
           if-no-files-found: error

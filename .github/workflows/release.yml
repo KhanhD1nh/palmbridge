@@ -14,11 +14,11 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            asset: palmbridge-macos-aarch64
+            asset: graft-macos-aarch64
           - os: ubuntu-24.04
-            asset: palmbridge-linux-x86_64
+            asset: graft-linux-x86_64
           - os: windows-latest
-            asset: palmbridge-windows-x86_64.exe
+            asset: graft-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -64,28 +64,28 @@ jobs:
 
       - name: Test
         working-directory: .grok-build
-        run: cargo test -p palmbridge
+        run: cargo test -p graft
 
       - name: Clippy
         working-directory: .grok-build
-        run: cargo clippy -p palmbridge --all-targets --no-deps
+        run: cargo clippy -p graft --all-targets --no-deps
 
       - name: Build (Unix)
         if: runner.os != 'Windows'
         working-directory: .grok-build
-        run: cargo build --release -p palmbridge
+        run: cargo build --release -p graft
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
         working-directory: .grok-build
         shell: pwsh
-        run: cargo build --release -p palmbridge
+        run: cargo build --release -p graft
 
       - name: Pack (Unix)
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          cp .grok-build/target/release/palmbridge "dist/${{ matrix.asset }}"
+          cp .grok-build/target/release/graft "dist/${{ matrix.asset }}"
           chmod +x "dist/${{ matrix.asset }}"
 
       - name: Pack (Windows)
@@ -93,7 +93,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item .grok-build\target\release\palmbridge.exe "dist\${{ matrix.asset }}" -Force
+          Copy-Item .grok-build\target\release\graft.exe "dist\${{ matrix.asset }}" -Force
 
       - uses: actions/upload-artifact@v5
         with:
@@ -111,9 +111,9 @@ jobs:
       - name: Flatten
         run: |
           mkdir -p release
-          find dist -type f -name 'palmbridge-*' -exec cp {} release/ \;
+          find dist -type f -name 'graft-*' -exec cp {} release/ \;
           cd release
-          sha256sum palmbridge-* > SHA256SUMS
+          sha256sum graft-* > SHA256SUMS
           ls -la
       - uses: softprops/action-gh-release@v2
         with:

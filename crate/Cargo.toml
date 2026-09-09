@@ -1,13 +1,13 @@
 [package]
-name = "palmbridge"
-version = "0.1.4"
+name = "graft"
+version = "0.1.5"
 edition.workspace = true
 license = "Apache-2.0"
 description = "Unofficial ChatGPT plugin: local coding tools over MCP. No model."
 publish = false
 
 [[bin]]
-name = "palmbridge"
+name = "graft"
 path = "src/main.rs"
 
 [dependencies]

@@ -19,14 +19,14 @@ use xai_grok_tools::notification::ToolNotificationHandle;
 use xai_grok_tools::registry::types::{SessionContext, ToolConfig, ToolServerConfig};
 use xai_grok_tools::reminders::DEFAULT_REMINDER_TAG;
 
-pub const APP: &str = "palmbridge";
-pub const DISPLAY: &str = "Palmbridge";
+pub const APP: &str = "graft";
+pub const DISPLAY: &str = "Graft";
 
 fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// XDG on Unix (`~/.config/palmbridge`). `%APPDATA%\palmbridge` on Windows.
+/// XDG on Unix (`~/.config/graft`). `%APPDATA%\graft` on Windows.
 pub fn config_dir() -> PathBuf {
     #[cfg(windows)]
     return dirs::config_dir()
@@ -54,19 +54,29 @@ pub fn mcp_socket() -> PathBuf {
     config_dir().join("mcp.sock")
 }
 
-/// Copy legacy configuration once if the new directory is empty.
+/// Copy existing configuration without overwriting Graft state.
 pub fn migrate_from_legacy() {
     let dest = config_dir();
-    if dest.join("workspace").is_file() || dest.join("control-plane.key").is_file() {
-        return;
+    let mut sources = Vec::new();
+    #[cfg(windows)]
+    {
+        let base = dirs::config_dir().unwrap_or_else(|| home_dir().join("AppData/Roaming"));
+        sources.push(base.join("palmbridge"));
+        sources.push(base.join("hands"));
     }
-    for legacy in ["hands", "grok-harness"] {
-        let src = home_dir().join(".config").join(legacy);
+    #[cfg(not(windows))]
+    {
+        let base = home_dir().join(".config");
+        sources.push(base.join("palmbridge"));
+        sources.push(base.join("hands"));
+        sources.push(base.join("grok-harness"));
+    }
+    for src in sources {
         if !src.is_dir() {
             continue;
         }
         let _ = std::fs::create_dir_all(&dest);
-        for name in ["workspace", "control-plane.key"] {
+        for name in ["workspace", "control-plane.key", "tunnel_id", "recent"] {
             let from = src.join(name);
             let to = dest.join(name);
             if from.is_file() && !to.exists() {
@@ -106,6 +116,7 @@ fn recent_file() -> PathBuf {
 }
 
 pub fn read_recent() -> Vec<PathBuf> {
+    migrate_from_legacy();
     let Ok(text) = std::fs::read_to_string(recent_file()) else {
         return Vec::new();
     };
@@ -317,7 +328,7 @@ fn add_auto_detected_lsp_servers(cwd: &Path, servers: &mut BTreeMap<String, LspS
 
 fn find_language_server(cwd: &Path, name: &str) -> Option<(String, Vec<String>)> {
     // Rustup proxies can be shadowed by repo-specific shims on PATH. Resolve
-    // the actual component first so Palmbridge does not accidentally start a broken
+    // the actual component first so Graft does not accidentally start a broken
     // rust-analyzer from another workspace.
     if name == "rust-analyzer"
         && let Ok(output) = Command::new("rustup").args(["which", "rust-analyzer"]).output()

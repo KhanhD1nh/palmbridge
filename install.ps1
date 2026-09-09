@@ -1,10 +1,10 @@
-# Palmbridge — native Windows install (port of install.sh)
-# Builds palmbridge.exe from xai-org/grok-build source, downloads tunnel-client.exe.
+# Graft — native Windows install (port of install.sh)
+# Builds graft.exe from xai-org/grok-build source, downloads tunnel-client.exe.
 # Requires: git, python3 (py), rustup (stable-msvc), VS Build Tools (C++).
 param(
     [string]$RepoRoot = (Split-Path -Parent $MyInvocation.MyCommand.Path),
     [string]$Prefix = "$env:USERPROFILE\.local",
-    [string]$Cache = "$env:USERPROFILE\.cache\palmbridge"
+    [string]$Cache = "$env:USERPROFILE\.cache\graft"
 )
 $ErrorActionPreference = "Stop"
 
@@ -53,13 +53,13 @@ if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
 
 Push-Location $GROK_BUILD
 try {
-    cargo build --release -p palmbridge
+    cargo build --release -p graft
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 } finally {
     Pop-Location
 }
 
-Copy-Item "$GROK_BUILD\target\release\palmbridge.exe" "$Prefix\bin\palmbridge.exe" -Force
+Copy-Item "$GROK_BUILD\target\release\graft.exe" "$Prefix\bin\graft.exe" -Force
 
 $TC_NAME = "tunnel-client-v$TC_VERSION-windows-amd64.zip"
 $TC_BASE = "https://github.com/openai/tunnel-client/releases/download/v$TC_VERSION"
@@ -77,7 +77,7 @@ Expand-Archive -Path $tcZip -DestinationPath (Join-Path $Cache "tunnel-client") 
 Copy-Item (Join-Path $Cache "tunnel-client\tunnel-client.exe") "$Prefix\bin\tunnel-client.exe" -Force
 Remove-Item $tcZip, $tcSums -Force
 
-& "$Prefix\bin\palmbridge.exe" --version
+& "$Prefix\bin\graft.exe" --version
 Write-Host ""
-Write-Host "installed $Prefix\bin\palmbridge.exe"
-Write-Host "next: cd /your/repo && palmbridge setup"
+Write-Host "installed $Prefix\bin\graft.exe"
+Write-Host "next: cd /your/repo && graft setup"

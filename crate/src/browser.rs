@@ -27,7 +27,7 @@ fn http_client() -> &'static reqwest::Client {
 pub fn tool_definition() -> Value {
     json!({
         "name": "browser",
-        "description": "Inspect and debug a real Chromium page. Operations: start (persistent debug browser), inspect (DOM + computed styles, optionally sampled over time), eval (run JavaScript), screenshot, stop. If no debug browser is running, inspect/eval/screenshot launch an ephemeral headless browser. For authenticated localhost apps, run operation=start once and sign in to the persistent Palmbridge browser profile.",
+        "description": "Inspect and debug a real Chromium page. Operations: start (persistent debug browser), inspect (DOM + computed styles, optionally sampled over time), eval (run JavaScript), screenshot, stop. If no debug browser is running, inspect/eval/screenshot launch an ephemeral headless browser. For authenticated localhost apps, run operation=start once and sign in to the persistent Graft browser profile.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -84,7 +84,7 @@ async fn start_persistent(arguments: &Value) -> Result<String, String> {
         None => free_port()?,
     };
     if cdp_ready(port).await {
-        return Ok(format!("Palmbridge browser is already listening on http://127.0.0.1:{port}."));
+        return Ok(format!("Graft browser is already listening on http://127.0.0.1:{port}."));
     }
     let browser = find_browser().ok_or_else(browser_not_found_message)?;
     let profile = arguments
@@ -108,7 +108,7 @@ async fn start_persistent(arguments: &Value) -> Result<String, String> {
     write_browser_state(pid, port)?;
     std::mem::forget(child);
     Ok(format!(
-        "Started Palmbridge browser (pid {pid}) on debug port {port}.\nProfile: {}\nURL: {url}\nIf the app requires authentication, sign in once in this browser; later browser inspect/eval calls can reuse the session.",
+        "Started Graft browser (pid {pid}) on debug port {port}.\nProfile: {}\nURL: {url}\nIf the app requires authentication, sign in once in this browser; later browser inspect/eval calls can reuse the session.",
         profile.display()
     ))
 }
@@ -137,9 +137,9 @@ fn stop_persistent() -> Result<String, String> {
         }
         let _ = fs::remove_file(pid_path);
         let _ = fs::remove_file(browser_port_path());
-        return Ok(format!("Stopped Palmbridge browser process {pid}."));
+        return Ok(format!("Stopped Graft browser process {pid}."));
     }
-    Ok("No Palmbridge browser pid is recorded.".into())
+    Ok("No Graft browser pid is recorded.".into())
 }
 
 async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> Result<String, String> {
@@ -156,7 +156,7 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
         let port = free_port()?;
         let browser = find_browser().ok_or_else(browser_not_found_message)?;
         let profile = std::env::temp_dir().join(format!(
-            "palmbridge-browser-{}-{}",
+            "graft-browser-{}-{}",
             std::process::id(),
             now_millis()
         ));
@@ -243,7 +243,7 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
                 .map_err(|e| format!("decode screenshot: {e}"))?;
             let output_path = match arguments.get("output_path").and_then(Value::as_str) {
                 Some(path) => workspace_output_path(cwd, path)?,
-                None => std::env::temp_dir().join(format!("palmbridge-browser-{}.png", now_millis())),
+                None => std::env::temp_dir().join(format!("graft-browser-{}.png", now_millis())),
             };
             fs::write(&output_path, bytes).map_err(|e| format!("write screenshot: {e}"))?;
             format!("Screenshot: {}", output_path.display())
@@ -452,7 +452,7 @@ async fn create_page_target(port: u16, url: &str) -> Result<Value, String> {
     response.json().await.map_err(|e| format!("parse new Chromium target: {e}"))
 }
 
-#[allow(clippy::disallowed_methods)] // Browser lifecycle is owned by Palmbridge, not an MCP task scope.
+#[allow(clippy::disallowed_methods)] // Browser lifecycle is owned by Graft, not an MCP task scope.
 fn spawn_browser(
     executable: &Path,
     port: u16,
@@ -481,7 +481,7 @@ fn spawn_browser(
 }
 
 fn find_browser() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("PALMBRIDGE_BROWSER_PATH") {
+    if let Ok(path) = std::env::var("GRAFT_BROWSER_PATH") {
         let p = PathBuf::from(path);
         if p.is_file() {
             return Some(p);
@@ -550,7 +550,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn browser_not_found_message() -> String {
-    "No Chromium browser found. Install Chrome/Brave/Edge/Chromium or set PALMBRIDGE_BROWSER_PATH.".into()
+    "No Chromium browser found. Install Chrome/Brave/Edge/Chromium or set GRAFT_BROWSER_PATH.".into()
 }
 
 fn free_port() -> Result<u16, String> {

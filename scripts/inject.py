@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy the Palmbridge crate into a grok-build checkout and register it."""
+"""Copy the Graft crate into a grok-build checkout and register it."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import shutil
 import sys
 from pathlib import Path
 
-MEMBER = '    "crates/codegen/palmbridge",'
+MEMBER = '    "crates/codegen/graft",'
 OLD_MEMBER = '    "crates/codegen/grok-harness",'
 LEGACY_MEMBER = '    "crates/codegen/hands",'
 
@@ -86,12 +86,12 @@ def quiet_upstream_warnings(grok_build: Path) -> None:
 
 def main() -> int:
     if len(sys.argv) != 3:
-        print("usage: inject.py <palmbridge-repo> <grok-build-checkout>", file=sys.stderr)
+        print("usage: inject.py <graft-repo> <grok-build-checkout>", file=sys.stderr)
         return 2
     src_repo = Path(sys.argv[1]).resolve()
     grok_build = Path(sys.argv[2]).resolve()
     crate_src = src_repo / "crate"
-    dest = grok_build / "crates" / "codegen" / "palmbridge"
+    dest = grok_build / "crates" / "codegen" / "graft"
     if not (crate_src / "Cargo.toml").is_file():
         print(f"missing crate at {crate_src}", file=sys.stderr)
         return 1
@@ -110,7 +110,7 @@ def main() -> int:
 
     root = grok_build / "Cargo.toml"
     text = root.read_text()
-    member = '    "crates/codegen/palmbridge",'
+    member = '    "crates/codegen/graft",'
     old_member = '    "crates/codegen/grok-harness",'
     legacy_member = '    "crates/codegen/hands",'
     if old_member in text:

@@ -7,8 +7,10 @@ use std::process::{Command, Stdio};
 
 use crate::host;
 
-const SERVICE: &str = "dev.palmbridge.runtime-key";
-const ACCOUNT: &str = "palmbridge";
+const SERVICE: &str = "dev.graft.runtime-key";
+const ACCOUNT: &str = "graft";
+const LEGACY_SERVICE: &str = "dev.palmbridge.runtime-key";
+const LEGACY_ACCOUNT: &str = "palmbridge";
 
 pub fn valid_runtime_key(key: &str) -> bool {
     key.starts_with("sk-") && key.len() >= 32 && !key.contains(char::is_whitespace)
@@ -31,7 +33,7 @@ pub fn get() -> Option<String> {
             return Some(k);
         }
     }
-    // Keychain can prompt; only from a TTY (palmbridge setup), never LaunchAgent.
+    // Keychain can prompt; only from a TTY (graft setup), never LaunchAgent.
     if std::io::stdin().is_terminal()
         && let Some(k) = keychain_get()
         && valid_runtime_key(&k)
@@ -74,22 +76,17 @@ pub fn ensure_file(key: &str) -> Result<PathBuf, String> {
 fn keychain_get() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        let out = Command::new("security")
-            .args(["find-generic-password", "-s", SERVICE, "-a", ACCOUNT, "-w"])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
+        for (service, account) in [(SERVICE, ACCOUNT), (LEGACY_SERVICE, LEGACY_ACCOUNT)] {
+            let out = Command::new("security").args(["find-generic-password", "-s", service, "-a", account, "-w"]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+            if out.status.success() {
+                let key = String::from_utf8(out.stdout).ok()?.trim().to_string();
+                if !key.is_empty() { return Some(key); }
+            }
         }
-        let k = String::from_utf8(out.stdout).ok()?.trim().to_string();
-        return if k.is_empty() { None } else { Some(k) };
+        None
     }
     #[cfg(not(target_os = "macos"))]
-    {
-        secret_tool_get()
-    }
+    { secret_tool_get() }
 }
 
 fn keychain_set(key: &str) -> Result<(), String> {
@@ -108,7 +105,7 @@ fn keychain_set(key: &str) -> Result<(), String> {
                 "-w",
                 key,
                 "-l",
-                "Palmbridge ChatGPT runtime key",
+                "Graft ChatGPT runtime key",
             ])
             .stdin(Stdio::null())
             .stderr(Stdio::piped())
@@ -127,16 +124,14 @@ fn keychain_set(key: &str) -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 fn secret_tool_get() -> Option<String> {
-    let out = Command::new("secret-tool")
-        .args(["lookup", "service", SERVICE, "account", ACCOUNT])
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    for (service, account) in [(SERVICE, ACCOUNT), (LEGACY_SERVICE, LEGACY_ACCOUNT)] {
+        let out = Command::new("secret-tool").args(["lookup", "service", service, "account", account]).stderr(Stdio::null()).output().ok()?;
+        if out.status.success() {
+            let key = String::from_utf8(out.stdout).ok()?.trim().to_string();
+            if !key.is_empty() { return Some(key); }
+        }
     }
-    let k = String::from_utf8(out.stdout).ok()?.trim().to_string();
-    if k.is_empty() { None } else { Some(k) }
+    None
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -146,7 +141,7 @@ fn secret_tool_set(key: &str) -> Result<(), String> {
         .args([
             "store",
             "--label",
-            "Palmbridge ChatGPT runtime key",
+            "Graft ChatGPT runtime key",
             "service",
             SERVICE,
             "account",

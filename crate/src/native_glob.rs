@@ -120,7 +120,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "palmbridge-{name}-{}-{nonce}",
+            "graft-{name}-{}-{nonce}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();

@@ -10,16 +10,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-24.04]
+        os: [macos-14, ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
 
+      - name: Read grok-build revision
+        id: grok
+        shell: bash
+        run: echo "rev=$(tr -d '[:space:]' < GROK_BUILD_REVISION)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v5
         with:
           repository: xai-org/grok-build
           path: .grok-build
+          ref: ${{ steps.grok.outputs.rev }}
 
       - name: Install protoc (Linux)
         if: runner.os == 'Linux'
@@ -29,14 +35,40 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install protobuf
 
-      - name: Inject crate
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Inject crate (Unix)
+        if: runner.os != 'Windows'
         run: python3 scripts/inject.py "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.grok-build"
+
+      - name: Inject crate (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python scripts/inject.py $env:GITHUB_WORKSPACE $env:GITHUB_WORKSPACE\.grok-build
+
+      - name: Apply Windows proto patch
+        if: runner.os == 'Windows'
+        working-directory: .grok-build
+        run: git apply ../scripts/windows-proto-build.patch
+
+      - name: Test
+        working-directory: .grok-build
+        run: cargo test -p palmbridge
+
+      - name: Clippy
+        working-directory: .grok-build
+        run: cargo clippy -p palmbridge --all-targets -- -D warnings
 
       - name: Build
         working-directory: .grok-build
         run: cargo build --release -p palmbridge
 
       - name: Smoke
+        if: runner.os != 'Windows'
         run: |
           bin=".grok-build/target/release/palmbridge"
           "$bin" --version
@@ -47,8 +79,25 @@ jobs:
           "$bin" use "$tmp"
           "$bin" call read_file '{"target_file":"n.txt"}' | grep -q hello
 
+      - name: Smoke (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = ".grok-build\target\release\palmbridge.exe"
+          & $bin --version
+          & $bin --help
+          & $bin status --json | Out-Null
+          $tmp = Join-Path $env:RUNNER_TEMP "palmbridge-smoke"
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          Set-Content -Path (Join-Path $tmp "n.txt") -Value "hello"
+          & $bin use $tmp
+          $out = & $bin call read_file '{"target_file":"n.txt"}'
+          if ($out -notmatch "hello") { throw "read_file smoke failed" }
+
       - uses: actions/upload-artifact@v5
         with:
           name: palmbridge-${{ runner.os }}-${{ runner.arch }}
-          path: .grok-build/target/release/palmbridge
+          path: |
+            .grok-build/target/release/palmbridge
+            .grok-build/target/release/palmbridge.exe
           if-no-files-found: error

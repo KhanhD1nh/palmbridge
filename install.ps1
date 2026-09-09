@@ -9,8 +9,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $GROK_BUILD_URL = "https://github.com/xai-org/grok-build.git"
-$GROK_BUILD_REF = "main"
-$TC_VERSION = "0.0.13"
+$GROK_BUILD_REF = (Get-Content (Join-Path $RepoRoot "GROK_BUILD_REVISION") -Raw).Trim()
+$TC_VERSION = "0.0.14"
 
 New-Item -ItemType Directory -Force -Path $Cache, "$Prefix\bin" | Out-Null
 $GROK_BUILD = Join-Path $Cache "grok-build"
@@ -20,8 +20,14 @@ if (Test-Path "$GROK_BUILD\.git") {
     git -C $GROK_BUILD checkout --force FETCH_HEAD
     git -C $GROK_BUILD clean -fdx
 } else {
-    git clone --depth 1 --branch $GROK_BUILD_REF $GROK_BUILD_URL $GROK_BUILD
-    if ($LASTEXITCODE -ne 0) { git clone --depth 1 $GROK_BUILD_URL $GROK_BUILD }
+    New-Item -ItemType Directory -Force -Path $GROK_BUILD | Out-Null
+    git -C $GROK_BUILD init
+    if ($LASTEXITCODE -ne 0) { throw "git init grok-build failed" }
+    git -C $GROK_BUILD remote add origin $GROK_BUILD_URL
+    git -C $GROK_BUILD fetch --depth 1 origin $GROK_BUILD_REF
+    if ($LASTEXITCODE -ne 0) { throw "fetch pinned grok-build revision failed" }
+    git -C $GROK_BUILD checkout --detach FETCH_HEAD
+    if ($LASTEXITCODE -ne 0) { throw "checkout pinned grok-build revision failed" }
 }
 
 $Python = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python*\python.exe" -ErrorAction SilentlyContinue |
@@ -55,12 +61,21 @@ try {
 
 Copy-Item "$GROK_BUILD\target\release\palmbridge.exe" "$Prefix\bin\palmbridge.exe" -Force
 
-$TC_URL = "https://persistent.oaistatic.com/tunnel-client/v$TC_VERSION/tunnel-client-v$TC_VERSION-windows-amd64.zip"
+$TC_NAME = "tunnel-client-v$TC_VERSION-windows-amd64.zip"
+$TC_BASE = "https://github.com/openai/tunnel-client/releases/download/v$TC_VERSION"
+$TC_URL = "$TC_BASE/$TC_NAME"
 $tcZip = Join-Path $Cache "tunnel-client.zip"
 Invoke-WebRequest -Uri $TC_URL -OutFile $tcZip
+$tcSums = Join-Path $Cache "tunnel-client-SHA256SUMS.txt"
+Invoke-WebRequest -Uri "$TC_BASE/SHA256SUMS.txt" -OutFile $tcSums
+$tcLine = Get-Content $tcSums | Where-Object { $_ -match "\s+$([regex]::Escape($TC_NAME))$" } | Select-Object -First 1
+if (-not $tcLine) { throw "No official checksum found for $TC_NAME" }
+$tcExpected = ($tcLine -split '\s+')[0].ToLowerInvariant()
+$tcActual = (Get-FileHash -Algorithm SHA256 $tcZip).Hash.ToLowerInvariant()
+if ($tcActual -ne $tcExpected) { throw "SHA-256 mismatch for $TC_NAME" }
 Expand-Archive -Path $tcZip -DestinationPath (Join-Path $Cache "tunnel-client") -Force
 Copy-Item (Join-Path $Cache "tunnel-client\tunnel-client.exe") "$Prefix\bin\tunnel-client.exe" -Force
-Remove-Item $tcZip -Force
+Remove-Item $tcZip, $tcSums -Force
 
 & "$Prefix\bin\palmbridge.exe" --version
 Write-Host ""

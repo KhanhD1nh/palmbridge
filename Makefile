@@ -7,12 +7,12 @@ inject:
 	python3 scripts/inject.py "$(CURDIR)" "$(GROK_BUILD)"
 
 build: inject
-	cd "$(GROK_BUILD)" && cargo build -p hands
+	cd "$(GROK_BUILD)" && cargo build -p palmbridge
 
 install:
 	./install.sh
 
 smoke: build
-	"$(GROK_BUILD)/target/debug/hands" --version
-	"$(GROK_BUILD)/target/debug/hands" --help
-	"$(GROK_BUILD)/target/debug/hands" status --json >/dev/null
+	"$(GROK_BUILD)/target/debug/palmbridge" --version
+	"$(GROK_BUILD)/target/debug/palmbridge" --help
+	"$(GROK_BUILD)/target/debug/palmbridge" status --json >/dev/null

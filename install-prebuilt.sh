@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPO="KhanhD1nh/palmbridge"
-TC_VERSION="0.0.13"
+TC_VERSION="0.0.14"
 VERSION="${1:-latest}"
 PREFIX="${2:-$HOME/.local}"
 BIN="$PREFIX/bin"
@@ -33,27 +33,86 @@ fi
 
 echo "Fetching release info..."
 DOWNLOAD_URL=$(curl -fsSL "$API_URL" | grep '"browser_download_url"' | grep "$ASSET" | head -1 | cut -d'"' -f4)
+CHECKSUM_URL=$(curl -fsSL "$API_URL" | grep '"browser_download_url"' | grep 'SHA256SUMS' | head -1 | cut -d'"' -f4)
 if [ -z "$DOWNLOAD_URL" ]; then
   echo "No asset found for $ASSET in release $VERSION"
   exit 1
 fi
+if [ -z "$CHECKSUM_URL" ]; then
+  echo "Release $VERSION has no SHA256SUMS; refusing unverified install"
+  exit 1
+fi
 
 echo "Downloading $ASSET..."
-curl -fsSL "$DOWNLOAD_URL" -o "$BIN/palmbridge"
+PB_TMP=$(mktemp)
+SUM_TMP=$(mktemp)
+trap 'rm -f "$PB_TMP" "$SUM_TMP"' EXIT
+curl -fsSL "$DOWNLOAD_URL" -o "$PB_TMP"
+curl -fsSL "$CHECKSUM_URL" -o "$SUM_TMP"
+EXPECTED=$(grep "  $ASSET$" "$SUM_TMP" | head -1 | cut -d' ' -f1)
+if [ -z "$EXPECTED" ]; then
+  echo "No checksum found for $ASSET"
+  exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL=$(sha256sum "$PB_TMP" | cut -d' ' -f1)
+else
+  ACTUAL=$(shasum -a 256 "$PB_TMP" | cut -d' ' -f1)
+fi
+if [ "$ACTUAL" != "$EXPECTED" ]; then
+  echo "SHA-256 mismatch for $ASSET"
+  exit 1
+fi
+mv "$PB_TMP" "$BIN/palmbridge"
 chmod +x "$BIN/palmbridge"
 "$BIN/palmbridge" --version
 
-# --- Download tunnel-client ---
-TC_OS="$OS"
-TC_ARCH="amd64"
-[ "$ARCH_TAG" = "aarch64" ] && TC_ARCH="arm64"
-TC_URL="https://persistent.oaistatic.com/tunnel-client/v$TC_VERSION/tunnel-client-v$TC_VERSION-${TC_OS}-${TC_ARCH}.tar.gz"
-TC_TMP=$(mktemp -d)
-echo "Downloading tunnel-client v$TC_VERSION..."
-curl -fsSL "$TC_URL" | tar xz -C "$TC_TMP"
-cp "$TC_TMP/tunnel-client" "$BIN/tunnel-client" 2>/dev/null || cp "$TC_TMP"/*/tunnel-client "$BIN/tunnel-client"
-chmod +x "$BIN/tunnel-client"
-rm -rf "$TC_TMP"
+# --- Install/download tunnel-client ---
+# OpenAI documents Homebrew as the supported macOS install path; directly
+# downloaded release ZIPs are not notarized. Linux uses the signed-release
+# checksum manifest and installs the verified binary into the Palmbridge prefix.
+if [ "$OS" = "darwin" ]; then
+  if ! command -v tunnel-client >/dev/null 2>&1; then
+    if ! command -v brew >/dev/null 2>&1; then
+      echo "tunnel-client on macOS requires Homebrew: brew install openai/tools/tunnel-client"
+      exit 1
+    fi
+    brew install openai/tools/tunnel-client
+  fi
+else
+  TC_OS="$OS"
+  TC_ARCH="amd64"
+  [ "$ARCH_TAG" = "aarch64" ] && TC_ARCH="arm64"
+  TC_NAME="tunnel-client-v$TC_VERSION-${TC_OS}-${TC_ARCH}.zip"
+  TC_BASE="https://github.com/openai/tunnel-client/releases/download/v$TC_VERSION"
+  TC_URL="$TC_BASE/$TC_NAME"
+  TC_TMP=$(mktemp -d)
+  echo "Downloading tunnel-client v$TC_VERSION..."
+  curl -fsSL "$TC_URL" -o "$TC_TMP/$TC_NAME"
+  curl -fsSL "$TC_BASE/SHA256SUMS.txt" -o "$TC_TMP/SHA256SUMS.txt"
+  TC_EXPECTED=$(grep "  $TC_NAME$" "$TC_TMP/SHA256SUMS.txt" | head -1 | cut -d' ' -f1)
+  if [ -z "$TC_EXPECTED" ]; then
+    echo "No official checksum found for $TC_NAME"
+    exit 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    TC_ACTUAL=$(sha256sum "$TC_TMP/$TC_NAME" | cut -d' ' -f1)
+  else
+    TC_ACTUAL=$(shasum -a 256 "$TC_TMP/$TC_NAME" | cut -d' ' -f1)
+  fi
+  if [ "$TC_ACTUAL" != "$TC_EXPECTED" ]; then
+    echo "SHA-256 mismatch for $TC_NAME"
+    exit 1
+  fi
+  if ! command -v unzip >/dev/null 2>&1; then
+    echo "Need unzip to extract tunnel-client"
+    exit 1
+  fi
+  unzip -q "$TC_TMP/$TC_NAME" -d "$TC_TMP/extract"
+  cp "$TC_TMP/extract/tunnel-client" "$BIN/tunnel-client"
+  chmod +x "$BIN/tunnel-client"
+  rm -rf "$TC_TMP"
+fi
 
 # --- PATH hint ---
 if ! echo "$PATH" | grep -q "$BIN"; then

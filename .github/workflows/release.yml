@@ -24,10 +24,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Read grok-build revision
+        id: grok
+        shell: bash
+        run: echo "rev=$(tr -d '[:space:]' < GROK_BUILD_REVISION)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v5
         with:
           repository: xai-org/grok-build
           path: .grok-build
+          ref: ${{ steps.grok.outputs.rev }}
 
       - name: Install protoc (Linux)
         if: runner.os == 'Linux'
@@ -55,6 +61,14 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: .grok-build
         run: git apply ../scripts/windows-proto-build.patch
+
+      - name: Test
+        working-directory: .grok-build
+        run: cargo test -p palmbridge
+
+      - name: Clippy
+        working-directory: .grok-build
+        run: cargo clippy -p palmbridge --all-targets -- -D warnings
 
       - name: Build (Unix)
         if: runner.os != 'Windows'
@@ -98,7 +112,9 @@ jobs:
         run: |
           mkdir -p release
           find dist -type f -name 'palmbridge-*' -exec cp {} release/ \;
-          ls -la release
+          cd release
+          sha256sum palmbridge-* > SHA256SUMS
+          ls -la
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*

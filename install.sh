@@ -6,7 +6,8 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
 CACHE="${PALMBRIDGE_CACHE:-${HANDS_CACHE:-${GROK_HARNESS_CACHE:-$HOME/.cache/palmbridge}}}"
 GROK_BUILD_URL="${GROK_BUILD_URL:-https://github.com/xai-org/grok-build.git}"
-GROK_BUILD_REF="${GROK_BUILD_REF:-main}"
+DEFAULT_GROK_BUILD_REF="$(tr -d '[:space:]' < "$REPO_ROOT/GROK_BUILD_REVISION")"
+GROK_BUILD_REF="${GROK_BUILD_REF:-$DEFAULT_GROK_BUILD_REF}"
 JOBS="${JOBS:-}"
 
 mkdir -p "$CACHE" "$PREFIX/bin"
@@ -17,8 +18,11 @@ if [[ -d "$GROK_BUILD/.git" ]]; then
   git -C "$GROK_BUILD" checkout --force FETCH_HEAD
   git -C "$GROK_BUILD" clean -fdx
 else
-  git clone --depth 1 --branch "$GROK_BUILD_REF" "$GROK_BUILD_URL" "$GROK_BUILD" \
-    || git clone --depth 1 "$GROK_BUILD_URL" "$GROK_BUILD"
+  mkdir -p "$GROK_BUILD"
+  git -C "$GROK_BUILD" init
+  git -C "$GROK_BUILD" remote add origin "$GROK_BUILD_URL"
+  git -C "$GROK_BUILD" fetch --depth 1 origin "$GROK_BUILD_REF"
+  git -C "$GROK_BUILD" checkout --detach FETCH_HEAD
 fi
 
 python3 "$REPO_ROOT/scripts/inject.py" "$REPO_ROOT" "$GROK_BUILD"

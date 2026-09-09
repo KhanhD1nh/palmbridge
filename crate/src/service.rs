@@ -1070,6 +1070,7 @@ fn spawn_tunnel_process() -> Result<u32, String> {
         .stdin(Stdio::null())
         .stdout(log_file("tunnel-client.out.log"))
         .stderr(log_file("tunnel-client.err.log"))
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("start tunnel-client: {e}"))?;
     let id = child.id();
@@ -1087,7 +1088,7 @@ fn spawn_mcp_process() -> Result<u32, String> {
         .args(["--http", "--port", "8787"])
         .stdin(Stdio::null())
         .stdout(log_file("mcp.out.log"))
-        .stderr(log_file("mcp.err.log"))
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("start MCP HTTP: {e}"))?;
     fs::create_dir_all(host::config_dir()).map_err(|e| format!("mkdir config: {e}"))?;

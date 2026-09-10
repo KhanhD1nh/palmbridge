@@ -236,7 +236,11 @@ fn allowlist() -> ToolServerConfig {
     }
 }
 
-fn session_context(cwd: PathBuf, owner_session_id: &str) -> SessionContext {
+fn session_context(
+    cwd: PathBuf,
+    owner_session_id: &str,
+    terminal_backend: Arc<LocalTerminalBackend>,
+) -> SessionContext {
     let host_dir = std::env::temp_dir().join(APP);
     let session_dir = host_dir
         .join("sessions")
@@ -245,7 +249,7 @@ fn session_context(cwd: PathBuf, owner_session_id: &str) -> SessionContext {
     let notification_handle = ToolNotificationHandle::noop();
     let lsp = build_lsp_backend(&cwd, notification_handle.clone());
     SessionContext {
-        backend: Arc::new(LocalTerminalBackend::new()),
+        backend: terminal_backend,
         fs: Arc::new(LocalFs),
         cwd,
         session_folder: session_dir,
@@ -483,10 +487,18 @@ fn command_for_path(path: PathBuf) -> (String, Vec<String>) {
     (path.display().to_string(), Vec::new())
 }
 
-pub async fn build_bridge(cwd: PathBuf, owner_session_id: &str) -> Result<ToolBridge, String> {
+pub async fn build_bridge(
+    cwd: PathBuf,
+    owner_session_id: &str,
+    terminal_backend: Arc<LocalTerminalBackend>,
+) -> Result<ToolBridge, String> {
     let mut builder = ToolBridge::get_builder();
     builder.set_system_reminders_enabled(false);
-    ToolBridge::finalize_builder(builder, allowlist(), session_context(cwd, owner_session_id))
-        .await
-        .map_err(|e| e.to_string())
+    ToolBridge::finalize_builder(
+        builder,
+        allowlist(),
+        session_context(cwd, owner_session_id, terminal_backend),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }

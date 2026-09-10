@@ -16,6 +16,7 @@ use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use xai_grok_tools::bridge::ToolBridge;
+use xai_grok_tools::computer::local::LocalTerminalBackend;
 use xai_grok_tools::types::output::{ReadFileOutput, ToolOutput, ToolRunResult};
 
 use crate::host;
@@ -55,6 +56,7 @@ struct SessionEntry {
 pub struct McpHost {
     fallback_cwd: PathBuf,
     default: Arc<SessionState>,
+    terminal_backend: Arc<LocalTerminalBackend>,
     sessions: Mutex<HashMap<String, SessionEntry>>,
     last_session_sweep: Mutex<Instant>,
     tool_descriptors: Mutex<Option<Vec<Value>>>,
@@ -71,6 +73,7 @@ impl McpHost {
                 workspace: RwLock::new(workspace),
                 cached: Mutex::new(None),
             }),
+            terminal_backend: Arc::new(LocalTerminalBackend::new()),
             sessions: Mutex::new(HashMap::new()),
             last_session_sweep: Mutex::new(Instant::now()),
             tool_descriptors: Mutex::new(None),
@@ -127,7 +130,9 @@ impl McpHost {
         {
             return Ok(bridge.clone());
         }
-        let bridge = host::build_bridge(cwd.clone(), &session.id).await?;
+        let bridge =
+            host::build_bridge(cwd.clone(), &session.id, Arc::clone(&self.terminal_backend))
+                .await?;
         *cache = Some((cwd, bridge.clone()));
         Ok(bridge)
     }
@@ -1212,12 +1217,84 @@ async fn write_http_with_headers<W: AsyncWrite + Unpin>(
 }
 #[cfg(test)]
 mod tests {
-    use super::{PROTOCOL_VERSION, negotiate_protocol};
+    use std::path::PathBuf;
+
+    use serde_json::{Value, json};
+
+    use super::{McpHost, PROTOCOL_VERSION, negotiate_protocol};
 
     #[test]
     fn protocol_negotiation_never_echoes_an_unsupported_version() {
         assert_eq!(negotiate_protocol(Some(PROTOCOL_VERSION)), PROTOCOL_VERSION);
         assert_eq!(negotiate_protocol(Some("2026-07-28")), PROTOCOL_VERSION);
         assert_eq!(negotiate_protocol(None), PROTOCOL_VERSION);
+    }
+
+    fn find_string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+        match value {
+            Value::Object(map) => map
+                .get(key)
+                .and_then(Value::as_str)
+                .or_else(|| map.values().find_map(|child| find_string_field(child, key))),
+            Value::Array(items) => items.iter().find_map(|child| find_string_field(child, key)),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn background_task_survives_across_stateless_requests() {
+        let host = McpHost::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let launch_session = host.stateless_session_state();
+        let launch_session_id = launch_session.id.clone();
+        #[cfg(windows)]
+        let command = "powershell -NoProfile -Command \"Start-Sleep -Milliseconds 500; Write-Output graft-background-regression\"";
+        #[cfg(not(windows))]
+        let command = "sleep 0.5; echo graft-background-regression";
+        let launch = host
+            .tools_call(
+                &launch_session,
+                json!({
+                    "name": "run_terminal_cmd",
+                    "arguments": {
+                        "command": command,
+                        "description": "Regression test for stateless background task persistence.",
+                        "is_background": true,
+                        "timeout": 0
+                    }
+                }),
+            )
+            .await
+            .expect("background command call should produce an MCP result");
+        let task_id = find_string_field(&launch, "task_id")
+            .expect("background command result should include task_id")
+            .to_string();
+        drop(launch_session);
+
+        let output_session = host.stateless_session_state();
+        assert_ne!(launch_session_id, output_session.id);
+
+        let output = host
+            .tools_call(
+                &output_session,
+                json!({
+                    "name": "get_task_output",
+                    "arguments": {
+                        "task_ids": [task_id],
+                        "timeout_ms": 5_000
+                    }
+                }),
+            )
+            .await
+            .expect("task output call should produce an MCP result");
+
+        let text = output.to_string();
+        assert!(
+            !text.contains("TaskNotFound") && !text.contains("No background tasks"),
+            "background task was lost across stateless requests: {text}"
+        );
+        assert!(
+            text.contains("graft-background-regression"),
+            "background task output was not retrievable: {text}"
+        );
     }
 }

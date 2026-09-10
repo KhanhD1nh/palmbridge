@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -16,6 +16,7 @@ use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use xai_grok_tools::bridge::ToolBridge;
+use xai_grok_tools::types::output::{ReadFileOutput, ToolOutput, ToolRunResult};
 
 use crate::host;
 use crate::plugin;
@@ -28,7 +29,10 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 // Keep reconnecting ChatGPT clients from exhausting session capacity. LSP
 // remains opt-in per session, so MCP handshakes must not be globally throttled.
 const SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MAX_HTTP_SESSIONS: usize = 256;
+const BATCH_READ_LIMIT: usize = 12;
+const BATCH_TEXT_LIMIT: usize = 40_000;
 
 fn negotiate_protocol(requested: Option<&str>) -> &'static str {
     match requested {
@@ -37,8 +41,8 @@ fn negotiate_protocol(requested: Option<&str>) -> &'static str {
     }
 }
 
-
 struct SessionState {
+    id: String,
     workspace: RwLock<PathBuf>,
     cached: Mutex<Option<(PathBuf, ToolBridge)>>,
 }
@@ -52,6 +56,8 @@ pub struct McpHost {
     fallback_cwd: PathBuf,
     default: Arc<SessionState>,
     sessions: Mutex<HashMap<String, SessionEntry>>,
+    last_session_sweep: Mutex<Instant>,
+    tool_descriptors: Mutex<Option<Vec<Value>>>,
     call_seq: AtomicU64,
 }
 
@@ -61,10 +67,13 @@ impl McpHost {
         Arc::new(Self {
             fallback_cwd,
             default: Arc::new(SessionState {
+                id: format!("default-{}", std::process::id()),
                 workspace: RwLock::new(workspace),
                 cached: Mutex::new(None),
             }),
             sessions: Mutex::new(HashMap::new()),
+            last_session_sweep: Mutex::new(Instant::now()),
+            tool_descriptors: Mutex::new(None),
             call_seq: AtomicU64::new(1),
         })
     }
@@ -77,7 +86,10 @@ impl McpHost {
 
     pub async fn debug_call(&self, name: &str, arguments: Value) -> Result<String, String> {
         let result = self
-            .tools_call(&self.default, json!({ "name": name, "arguments": arguments }))
+            .tools_call(
+                &self.default,
+                json!({ "name": name, "arguments": arguments }),
+            )
             .await
             .map_err(|(_, message, _)| message)?;
         let text = result
@@ -88,7 +100,11 @@ impl McpHost {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
+        if result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             Err(text)
         } else {
             Ok(text)
@@ -96,7 +112,8 @@ impl McpHost {
     }
 
     fn workspace(&self, session: &SessionState) -> PathBuf {
-        session.workspace
+        session
+            .workspace
             .read()
             .map(|path| path.clone())
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
@@ -110,9 +127,38 @@ impl McpHost {
         {
             return Ok(bridge.clone());
         }
-        let bridge = host::build_bridge(cwd.clone()).await?;
+        let bridge = host::build_bridge(cwd.clone(), &session.id).await?;
         *cache = Some((cwd, bridge.clone()));
         Ok(bridge)
+    }
+
+    async fn bridge_tool_descriptors(
+        &self,
+        session: &SessionState,
+    ) -> Result<Vec<Value>, (i64, String, Value)> {
+        let mut cache = self.tool_descriptors.lock().await;
+        if let Some(tools) = cache.as_ref() {
+            return Ok(tools.clone());
+        }
+        let defs = self
+            .bridge(session)
+            .await
+            .map_err(|e| (-32603, e, Value::Null))?
+            .tool_definitions()
+            .await;
+        let tools = defs
+            .into_iter()
+            .map(|d| {
+                let name = d.function.name;
+                let description = plugin::compact_description(
+                    &name,
+                    d.function.description.as_deref().unwrap_or_default(),
+                );
+                plugin::tool_descriptor(&name, &description, d.function.parameters)
+            })
+            .collect::<Vec<_>>();
+        *cache = Some(tools.clone());
+        Ok(tools)
     }
 
     fn workspace_info_result(&self, session: &SessionState) -> Value {
@@ -144,21 +190,31 @@ impl McpHost {
         })
     }
 
-    async fn switch_workspace(&self, session: &SessionState, raw: &str) -> Result<PathBuf, String> {
+    async fn switch_workspace(
+        &self,
+        session: &SessionState,
+        raw: &str,
+        persist: bool,
+    ) -> Result<PathBuf, String> {
         let path = host::resolve_project(raw)?;
         let cwd = dunce::canonicalize(&path).map_err(|e| format!("canonicalize: {e}"))?;
         match session.workspace.write() {
             Ok(mut workspace) => *workspace = cwd.clone(),
             Err(poisoned) => *poisoned.into_inner() = cwd.clone(),
         }
-        host::remember_workspace(&cwd);
+        if persist {
+            host::pin_workspace(&cwd)?;
+        } else {
+            host::remember_workspace(&cwd);
+        }
         let mut cache = session.cached.lock().await;
         *cache = None;
         Ok(cwd)
     }
 
-    fn fresh_session_state(&self) -> Arc<SessionState> {
+    fn fresh_session_state(&self, id: String) -> Arc<SessionState> {
         Arc::new(SessionState {
+            id,
             // The persisted pin is a default for *new* sessions. Re-resolve it
             // here so `graft use` takes effect without disrupting sessions
             workspace: RwLock::new(host::resolve_workspace(&self.fallback_cwd)),
@@ -166,12 +222,34 @@ impl McpHost {
         })
     }
 
+    fn stateless_session_state(&self) -> Arc<SessionState> {
+        let id = format!(
+            "stateless-{}-{}",
+            std::process::id(),
+            self.call_seq.fetch_add(1, Ordering::Relaxed)
+        );
+        self.fresh_session_state(id)
+    }
+
+    async fn sweep_sessions_if_due(&self, now: Instant) {
+        let mut last = self.last_session_sweep.lock().await;
+        if now.duration_since(*last) < SESSION_SWEEP_INTERVAL {
+            return;
+        }
+        *last = now;
+        drop(last);
+        self.sessions
+            .lock()
+            .await
+            .retain(|_, entry| now.duration_since(entry.last_used) < SESSION_TTL);
+    }
+
     async fn begin_http_session(&self) -> Result<(String, Arc<SessionState>), String> {
         let id = security::new_session_id()?;
-        let session = self.fresh_session_state();
+        let session = self.fresh_session_state(id.clone());
         let now = Instant::now();
+        self.sweep_sessions_if_due(now).await;
         let mut sessions = self.sessions.lock().await;
-        sessions.retain(|_, entry| now.duration_since(entry.last_used) < SESSION_TTL);
         if sessions.len() >= MAX_HTTP_SESSIONS {
             return Err("too many active MCP HTTP sessions".into());
         }
@@ -187,8 +265,8 @@ impl McpHost {
 
     async fn http_session(&self, id: &str) -> Option<Arc<SessionState>> {
         let now = Instant::now();
+        self.sweep_sessions_if_due(now).await;
         let mut sessions = self.sessions.lock().await;
-        sessions.retain(|_, entry| now.duration_since(entry.last_used) < SESSION_TTL);
         let entry = sessions.get_mut(id)?;
         entry.last_used = now;
         Some(Arc::clone(&entry.state))
@@ -202,11 +280,7 @@ impl McpHost {
         let stdin = BufReader::new(tokio::io::stdin());
         let mut lines = stdin.lines();
         let mut stdout = tokio::io::stdout();
-        while let Some(line) = lines
-            .next_line()
-            .await
-            .map_err(|e| format!("stdin: {e}"))?
-        {
+        while let Some(line) = lines.next_line().await.map_err(|e| format!("stdin: {e}"))? {
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -229,8 +303,8 @@ impl McpHost {
     pub async fn serve_http(self: Arc<Self>, addr: SocketAddr) -> Result<(), String> {
         let warm = Arc::clone(&self);
         tokio::spawn(async move {
-            if let Err(e) = warm.bridge(&warm.default).await {
-                eprintln!("warmup: {e}");
+            if let Err((_, e, _)) = warm.bridge_tool_descriptors(&warm.default).await {
+                eprintln!("tool warmup: {e}");
             }
         });
         #[cfg(unix)]
@@ -240,8 +314,8 @@ impl McpHost {
                 let _ = std::fs::create_dir_all(parent);
             }
             let _ = std::fs::remove_file(&sock);
-            let uds = UnixListener::bind(&sock)
-                .map_err(|e| format!("bind {}: {e}", sock.display()))?;
+            let uds =
+                UnixListener::bind(&sock).map_err(|e| format!("bind {}: {e}", sock.display()))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -319,11 +393,7 @@ impl McpHost {
             "skills/get" => plugin::skills_get(&params),
             "resources/list" => Ok(plugin::resources_list()),
             "resources/read" => plugin::resources_read(&params),
-            other => Err((
-                -32601,
-                format!("method not found: {other}"),
-                Value::Null,
-            )),
+            other => Err((-32601, format!("method not found: {other}"), Value::Null)),
         };
 
         Some(match result {
@@ -342,9 +412,8 @@ impl McpHost {
     }
 
     fn initialize(&self, session: &SessionState, params: Value) -> Value {
-        let negotiated_version = negotiate_protocol(
-            params.get("protocolVersion").and_then(Value::as_str),
-        );
+        let negotiated_version =
+            negotiate_protocol(params.get("protocolVersion").and_then(Value::as_str));
         json!({
             "protocolVersion": negotiated_version,
             "capabilities": plugin::initialize_capabilities(),
@@ -362,61 +431,86 @@ impl McpHost {
         let mut tools = vec![
             plugin::tool_descriptor(
                 "workspace_info",
-                "Use this when you need the active local workspace root and recently used folders. Call before other tools if the workspace might have changed.",
+                "Show the active workspace and recently used repositories.",
                 json!({ "type": "object", "properties": {} }),
             ),
             plugin::tool_descriptor(
                 "set_workspace",
-                "Use this when the user wants another repo, including while they are not at the machine. Switches the current Graft server session without changing the persisted default. Accepts an absolute path, ~/path, or a short name resolved under ~/Dev (e.g. bunko).",
+                "Switch this MCP session to another repository. Set persist=true only when the switch must survive reconnects.",
                 json!({
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
                             "description": "Directory to pin: absolute, ~/…, or folder name under ~/Dev"
+                        },
+                        "persist": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Also change the persisted default workspace used by new/reconnected sessions."
                         }
                     },
                     "required": ["path"]
                 }),
             ),
         ];
-        let defs = self
-            .bridge(session)
-            .await
-            .map_err(|e| (-32603, e, Value::Null))?
-            .tool_definitions()
-            .await;
-        tools.extend(defs.into_iter().map(|d| {
-            let name = d.function.name;
-            let description = d.function.description.unwrap_or_default();
-            plugin::tool_descriptor(&name, &description, d.function.parameters)
-        }));
+        tools.extend(self.bridge_tool_descriptors(session).await?);
+        tools.push(plugin::tool_descriptor(
+            "batch_read",
+            "Read up to 12 files/ranges in one call. Prefer this when several known files are needed together.",
+            batch_read_schema(),
+        ));
+        tools.push(plugin::tool_descriptor(
+            "git_status",
+            "Return read-only Git branch/worktree status as text plus structured entries.",
+            crate::git_tools::status_schema(),
+        ));
+        tools.push(plugin::tool_descriptor(
+            "git_diff",
+            "Return a read-only Git diff or diff stat without invoking a shell.",
+            crate::git_tools::diff_schema(),
+        ));
         tools.push(crate::browser::tool_definition());
         Ok(json!({ "tools": tools }))
     }
 
-    async fn tools_call(&self, session: &SessionState, params: Value) -> Result<Value, (i64, String, Value)> {
-        let name = params
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or((-32602, "tools/call requires name".into(), Value::Null))?;
+    async fn tools_call(
+        &self,
+        session: &SessionState,
+        params: Value,
+    ) -> Result<Value, (i64, String, Value)> {
+        let name = params.get("name").and_then(Value::as_str).ok_or((
+            -32602,
+            "tools/call requires name".into(),
+            Value::Null,
+        ))?;
         if name == "workspace_info" {
             return Ok(self.workspace_info_result(session));
         }
         if name == "set_workspace" {
             let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-            let path = arguments
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or((-32602, "set_workspace requires path".into(), Value::Null))?;
-            return match self.switch_workspace(session, path).await {
+            let path = arguments.get("path").and_then(Value::as_str).ok_or((
+                -32602,
+                "set_workspace requires path".into(),
+                Value::Null,
+            ))?;
+            let persist = arguments
+                .get("persist")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            return match self.switch_workspace(session, path, persist).await {
                 Ok(cwd) => Ok(json!({
                     "content": [{
                         "type": "text",
-                        "text": format!("workspace switched for this Graft server session: {}\nThe persisted default workspace was not changed.", cwd.display())
+                        "text": if persist {
+                            format!("workspace switched to {} and saved as the persisted default.", cwd.display())
+                        } else {
+                            format!("workspace switched for this Graft server session: {}", cwd.display())
+                        }
                     }],
                     "structuredContent": {
-                        "workspace": cwd.display().to_string()
+                        "workspace": cwd.display().to_string(),
+                        "persisted": persist
                     },
                     "isError": false
                 })),
@@ -427,53 +521,321 @@ impl McpHost {
             };
         }
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+        if name == "batch_read" {
+            return self.batch_read(session, &arguments).await;
+        }
         if name == "glob" {
             let cwd = self.workspace(session);
             return match crate::native_glob::run(&arguments, &cwd) {
-                Ok(text) => Ok(json!({
-                    "content": [{ "type": "text", "text": text }],
+                Ok(result) => Ok(json!({
+                    "content": [{ "type": "text", "text": result.text }],
+                    "structuredContent": {
+                        "paths": result.paths,
+                        "mode": result.mode,
+                        "total": result.total,
+                        "truncated": result.truncated
+                    },
                     "isError": false
                 })),
                 Err(error) => Ok(json!({
                     "content": [{ "type": "text", "text": error }],
                     "isError": true
                 })),
+            };
+        }
+        if name == "git_status" {
+            let cwd = self.workspace(session);
+            return match crate::git_tools::status(&cwd) {
+                Ok((text, structured)) => Ok(json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "structuredContent": structured,
+                    "isError": false
+                })),
+                Err(error) => Ok(tool_error(error)),
+            };
+        }
+        if name == "git_diff" {
+            let cwd = self.workspace(session);
+            return match crate::git_tools::diff(&arguments, &cwd) {
+                Ok((text, structured)) => Ok(json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "structuredContent": structured,
+                    "isError": false
+                })),
+                Err(error) => Ok(tool_error(error)),
             };
         }
         if name == "browser" {
             let cwd = self.workspace(session);
             return match crate::browser::run(&arguments, &cwd).await {
-                Ok(text) => Ok(json!({
-                    "content": [{ "type": "text", "text": text }],
-                    "isError": false
-                })),
-                Err(error) => Ok(json!({
-                    "content": [{ "type": "text", "text": error }],
-                    "isError": true
-                })),
+                Ok(result) => {
+                    let mut content = vec![json!({ "type": "text", "text": result.text })];
+                    if let Some(image) = result.image {
+                        content.push(json!({
+                            "type": "image",
+                            "data": image.data,
+                            "mimeType": image.mime_type
+                        }));
+                    }
+                    Ok(json!({
+                        "content": content,
+                        "structuredContent": result.structured,
+                        "isError": false
+                    }))
+                }
+                Err(error) => Ok(tool_error(error)),
             };
         }
-        let call_id = format!(
-            "mcp-{}",
-            self.call_seq.fetch_add(1, Ordering::Relaxed)
-        );
+        let call_id = format!("mcp-{}", self.call_seq.fetch_add(1, Ordering::Relaxed));
         let bridge = self
             .bridge(session)
             .await
             .map_err(|e| (-32603, e, Value::Null))?;
         match bridge.call(name, arguments, &call_id).await {
-            Ok(result) => Ok(json!({
-                "content": [{ "type": "text", "text": result.prompt_text }],
-                "isError": false
-            })),
-            Err(e) => Ok(json!({
-                "content": [{ "type": "text", "text": e.to_string() }],
-                "isError": true
-            })),
+            Ok(result) => Ok(bridge_result_to_mcp(result)),
+            Err(e) => Ok(tool_error(e.to_string())),
+        }
+    }
+
+    async fn batch_read(
+        &self,
+        session: &SessionState,
+        arguments: &Value,
+    ) -> Result<Value, (i64, String, Value)> {
+        let files = arguments.get("files").and_then(Value::as_array).ok_or((
+            -32602,
+            "batch_read requires files".into(),
+            Value::Null,
+        ))?;
+        if files.is_empty() || files.len() > BATCH_READ_LIMIT {
+            return Ok(tool_error(format!(
+                "batch_read requires 1 to {BATCH_READ_LIMIT} files"
+            )));
+        }
+
+        let bridge = self
+            .bridge(session)
+            .await
+            .map_err(|e| (-32603, e, Value::Null))?;
+        let mut combined = String::new();
+        let mut media = Vec::new();
+        let mut structured = Vec::with_capacity(files.len());
+        let mut successes = 0usize;
+        let mut failures = 0usize;
+
+        for file in files {
+            let target = file
+                .get("target_file")
+                .and_then(Value::as_str)
+                .unwrap_or("(missing target_file)");
+            if !combined.is_empty() {
+                combined.push_str("\n\n");
+            }
+            combined.push_str(&format!("===== {target} =====\n"));
+
+            let call_id = format!("mcp-{}", self.call_seq.fetch_add(1, Ordering::Relaxed));
+            match bridge.call("read_file", file.clone(), &call_id).await {
+                Ok(result) => {
+                    let is_error = result.output.is_error();
+                    if is_error {
+                        failures += 1;
+                    } else {
+                        successes += 1;
+                    }
+                    combined.push_str(&result.prompt_text);
+                    append_media_content(&result.output, &mut media);
+                    structured.push(json!({
+                        "target_file": target,
+                        "isError": is_error,
+                        "output": compact_output(&result.output)
+                    }));
+                }
+                Err(error) => {
+                    failures += 1;
+                    let message = error.to_string();
+                    combined.push_str(&message);
+                    structured.push(json!({
+                        "target_file": target,
+                        "isError": true,
+                        "error": message
+                    }));
+                }
+            }
+        }
+
+        let (combined, truncated) = truncate_middle(&combined, BATCH_TEXT_LIMIT);
+        let mut content = vec![json!({ "type": "text", "text": combined })];
+        content.extend(media);
+        Ok(json!({
+            "content": content,
+            "structuredContent": {
+                "results": structured,
+                "successes": successes,
+                "failures": failures,
+                "truncated": truncated
+            },
+            "isError": successes == 0 && failures > 0
+        }))
+    }
+}
+
+fn batch_read_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "files": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": BATCH_READ_LIMIT,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "target_file": { "type": "string" },
+                        "offset": { "type": "integer", "minimum": 1 },
+                        "limit": { "type": "integer", "minimum": 1 },
+                        "format": { "type": ["string", "null"] },
+                        "pages": { "type": ["string", "null"] }
+                    },
+                    "required": ["target_file"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["files"],
+        "additionalProperties": false
+    })
+}
+
+fn bridge_result_to_mcp(result: ToolRunResult) -> Value {
+    let is_error = result.output.is_error();
+    let structured = compact_output(&result.output);
+    let mut content = vec![json!({ "type": "text", "text": result.prompt_text })];
+    append_media_content(&result.output, &mut content);
+    json!({
+        "content": content,
+        "structuredContent": {
+            "output": structured,
+            "effectiveToolName": result.effective_tool_name
+        },
+        "isError": is_error
+    })
+}
+
+fn compact_output(output: &ToolOutput) -> Value {
+    match output {
+        ToolOutput::ReadFile(ReadFileOutput::FileContent(file)) => json!({
+            "type": "ReadFile",
+            "absolutePath": file.absolute_path,
+            "offset": file.offset,
+            "limit": file.limit,
+            "totalLines": file.total_lines,
+            "extractedImageCount": file.extracted_images.len()
+        }),
+        ToolOutput::ReadFile(ReadFileOutput::ImageContent(image)) => json!({
+            "type": "ReadFileImage",
+            "mimeType": image.mime_type,
+            "uri": image.uri,
+            "meta": image.meta
+        }),
+        ToolOutput::ReadFile(ReadFileOutput::PdfPageImages(pdf)) => json!({
+            "type": "ReadFilePdfPages",
+            "pageNumbers": pdf.pages.iter().map(|page| page.page_number).collect::<Vec<_>>(),
+            "totalPages": pdf.total_pages,
+            "fileSize": pdf.file_size
+        }),
+        _ => {
+            let mut value = serde_json::to_value(output).unwrap_or_else(
+                |_| json!({ "type": "Unknown", "text": output.to_prompt_format() }),
+            );
+            compact_json_value(&mut value);
+            value
         }
     }
 }
 
+fn compact_json_value(value: &mut Value) {
+    match value {
+        Value::String(text) if text.chars().count() > 2_000 => {
+            let total = text.chars().count();
+            let prefix: String = text.chars().take(2_000).collect();
+            *text = format!("{prefix}… [{total} chars total]");
+        }
+        Value::Array(items) if items.len() > 256 => {
+            let len = items.len();
+            *value = json!({ "omittedItems": len });
+        }
+        Value::Array(items) => {
+            for item in items {
+                compact_json_value(item);
+            }
+        }
+        Value::Object(map) => {
+            for child in map.values_mut() {
+                compact_json_value(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn append_media_content(output: &ToolOutput, content: &mut Vec<Value>) {
+    match output {
+        ToolOutput::ReadFile(ReadFileOutput::ImageContent(image)) => {
+            content.push(json!({
+                "type": "image",
+                "data": image.data,
+                "mimeType": image.mime_type
+            }));
+        }
+        ToolOutput::ReadFile(ReadFileOutput::PdfPageImages(pdf)) => {
+            for page in &pdf.pages {
+                content.push(json!({
+                    "type": "image",
+                    "data": page.data,
+                    "mimeType": page.mime_type
+                }));
+            }
+        }
+        ToolOutput::ReadFile(ReadFileOutput::FileContent(file)) => {
+            for image in &file.extracted_images {
+                content.push(json!({
+                    "type": "image",
+                    "data": image.data,
+                    "mimeType": image.mime_type
+                }));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn tool_error(error: String) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": error }],
+        "isError": true
+    })
+}
+
+fn truncate_middle(text: &str, limit: usize) -> (String, bool) {
+    let count = text.chars().count();
+    if count <= limit {
+        return (text.to_string(), false);
+    }
+    let marker = format!("\n... output truncated; {count} chars total ...\n");
+    let keep = limit.saturating_sub(marker.chars().count());
+    let head = keep * 2 / 3;
+    let tail = keep - head;
+    let start: String = text.chars().take(head).collect();
+    let end: String = text
+        .chars()
+        .rev()
+        .take(tail)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    (format!("{start}{marker}{end}"), true)
+}
 
 fn rpc_error(id: Value, code: i64, message: String) -> Value {
     rpc_error_with_data(id, code, message, Value::Null)
@@ -524,8 +886,7 @@ where
                 break;
             }
             if header_buf.len() > 64 * 1024 {
-                write_http(&mut writer, 431, "text/plain", b"headers too large", false)
-                    .await?;
+                write_http(&mut writer, 431, "text/plain", b"headers too large", false).await?;
                 return Ok(());
             }
         }
@@ -636,11 +997,16 @@ where
                 .next()
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"));
             if !json_body
-                || (!origin.is_empty()
-                    && !security::is_same_loopback_origin(&origin, &host_header))
+                || (!origin.is_empty() && !security::is_same_loopback_origin(&origin, &host_header))
             {
-                write_http(&mut writer, 403, "application/json", br#"{"error":"forbidden"}"#, keep)
-                    .await?;
+                write_http(
+                    &mut writer,
+                    403,
+                    "application/json",
+                    br#"{"error":"forbidden"}"#,
+                    keep,
+                )
+                .await?;
                 if !keep {
                     return Ok(());
                 }
@@ -714,16 +1080,17 @@ where
         } else if method == Some("server/discover") {
             // tunnel-client discovers before initialize. Do not attach a
             // session header here: it treats discovery as stateless.
-            (Arc::clone(&host.default), None)
+            (host.stateless_session_state(), None)
         } else if mcp_session_id.is_empty()
             && msg
                 .pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
                 .and_then(Value::as_str)
                 .is_some_and(|version| version >= "2026-07-28")
         {
-            // MCP 2026-07-28 is stateless: each request includes the protocol
-            // version and client capabilities in params._meta.
-            (Arc::clone(&host.default), None)
+            // MCP 2026-07-28 is stateless. Never share mutable workspace/tool
+            // state across independent requests; re-resolve the persisted
+            // workspace each time instead.
+            (host.stateless_session_state(), None)
         } else if !mcp_session_id.is_empty() {
             let Some(session) = host.http_session(&mcp_session_id).await else {
                 write_http(&mut writer, 404, "text/plain", b"unknown MCP session", keep).await?;
@@ -749,15 +1116,7 @@ where
         };
 
         let Some(resp) = host.handle_rpc(&session, msg).await else {
-            write_http_with_headers(
-                &mut writer,
-                202,
-                "application/json",
-                b"",
-                keep,
-                &[],
-            )
-            .await?;
+            write_http_with_headers(&mut writer, 202, "application/json", b"", keep, &[]).await?;
             if !keep {
                 return Ok(());
             }
@@ -828,11 +1187,7 @@ async fn write_http_with_headers<W: AsyncWrite + Unpin>(
         431 => "Request Header Fields Too Large",
         _ => "Error",
     };
-    let conn = if keep_alive {
-        "keep-alive"
-    } else {
-        "close"
-    };
+    let conn = if keep_alive { "keep-alive" } else { "close" };
     let mut header = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: {conn}\r\n\r\n",
         body.len()
@@ -851,16 +1206,13 @@ async fn write_http_with_headers<W: AsyncWrite + Unpin>(
     let mut buf = Vec::with_capacity(header.len() + body.len());
     buf.extend_from_slice(header.as_bytes());
     buf.extend_from_slice(body);
-    writer
-        .write_all(&buf)
-        .await
-        .map_err(|e| e.to_string())?;
+    writer.write_all(&buf).await.map_err(|e| e.to_string())?;
     writer.flush().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 #[cfg(test)]
 mod tests {
-    use super::{negotiate_protocol, PROTOCOL_VERSION};
+    use super::{PROTOCOL_VERSION, negotiate_protocol};
 
     #[test]
     fn protocol_negotiation_never_echoes_an_unsupported_version() {

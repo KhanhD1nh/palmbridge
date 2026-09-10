@@ -1,17 +1,18 @@
 //! Graft — unofficial ChatGPT plugin. Local coding tools. No model.
 
-mod host;
 mod browser;
+mod git_tools;
+mod host;
 mod mcp;
-mod plugin;
 mod native_glob;
-mod security;
+mod plugin;
 mod secrets;
-mod state;
+mod security;
 mod service;
 mod setup;
-mod update;
+mod state;
 mod ui;
+mod update;
 mod watch;
 
 use std::net::SocketAddr;
@@ -49,6 +50,7 @@ enum Cmd {
     Start,
     Stop,
     Update,
+    CheckUpdate,
     Supervise,
     Watch,
     McpStdio,
@@ -115,6 +117,7 @@ fn parse_args() -> Result<(PathBuf, Cmd), String> {
             [op] if op == "start" => Cmd::Start,
             [op] if op == "stop" => Cmd::Stop,
             [op] if op == "update" => Cmd::Update,
+            [op] if op == "--check-update" => Cmd::CheckUpdate,
             [op] if op == "list" => Cmd::List,
             [op, tool, json] if op == "call" => Cmd::Call {
                 tool: tool.clone(),
@@ -206,11 +209,16 @@ async fn run(fallback: PathBuf, cmd: Cmd) -> Result<(), String> {
         Cmd::Enable => service::enable(),
         Cmd::Disable => service::disable(),
         Cmd::Start => {
-            update::check_on_start().await;
-            service::start()
+            service::start()?;
+            update::spawn_start_check();
+            Ok(())
         }
         Cmd::Stop => service::stop(),
         Cmd::Update => update::run().await,
+        Cmd::CheckUpdate => {
+            update::check_on_start().await;
+            Ok(())
+        }
         Cmd::Supervise => {
             service::supervise();
             Ok(())

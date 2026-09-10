@@ -258,7 +258,7 @@ cd C:\path\to\repository
 graft use
 ```
 
-`workspace_info` reports the active session workspace. `set_workspace` switches only the current MCP session; `graft use` changes the persisted default used by new sessions.
+`workspace_info` reports the active session workspace. `set_workspace` switches a stateful MCP session; pass `persist=true` when a stateless/reconnecting client needs the switch to survive the next request. `graft use` changes the persisted default used by new sessions.
 
 | Command | Purpose |
 |---|---|
@@ -289,7 +289,8 @@ For unattended edits, select **Always allow** on the first write, or set **Setti
 | Tool | Purpose |
 |---|---|
 | `workspace_info`, `set_workspace` | Inspect or switch workspace |
-| `read_file`, `grep`, `list_dir`, `glob` | Read and search files |
+| `read_file`, `batch_read`, `grep`, `list_dir`, `glob` | Read and search files |
+| `git_status`, `git_diff` | Structured read-only repository status and diffs |
 | `lsp` | Definitions, references, symbols, hover |
 | `browser` | Inspect local Chromium pages, run JavaScript, screenshots |
 | `search_replace`, `write`, `apply_patch` | Edit files |

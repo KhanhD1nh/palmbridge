@@ -2,12 +2,13 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use semver::Version;
 use sha2::{Digest, Sha256};
 
+use crate::host;
 use crate::service;
 
 const RELEASE_API: &str = "https://api.github.com/repos/KhanhD1nh/palmbridge/releases/latest";
@@ -19,6 +20,49 @@ struct Release {
     tag: String,
     version: Version,
     json: serde_json::Value,
+}
+
+/// Check releases out-of-process so `graft start` never waits on GitHub.
+/// The result is written to the normal Graft log directory.
+#[allow(clippy::disallowed_methods)] // Intentionally detached maintenance child; not an MCP/session-owned process.
+pub fn spawn_start_check() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let log_dir = host::config_dir().join("logs");
+    if fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+    let log_path = log_dir.join("update-check.log");
+    let Ok(stderr) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    else {
+        return;
+    };
+    let stdout = stderr.try_clone().ok();
+
+    let mut command = Command::new(exe);
+    command
+        .arg("--check-update")
+        .stdin(Stdio::null())
+        .stderr(stderr);
+    if let Some(stdout) = stdout {
+        command.stdout(stdout);
+    } else {
+        command.stdout(Stdio::null());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
+    }
+    if let Err(error) = command.spawn() {
+        eprintln!("could not start update check: {error}");
+    }
 }
 
 pub async fn check_on_start() {
@@ -58,18 +102,14 @@ pub async fn run() -> Result<(), String> {
     verify_checksum(asset_name, &binary, &sums)?;
     eprintln!("verified SHA-256");
 
-    let current_exe = std::env::current_exe()
-        .map_err(|e| format!("resolve current executable: {e}"))?;
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("resolve current executable: {e}"))?;
     let staged = staged_path(&current_exe, &release.version)?;
     if staged.exists() {
         fs::remove_file(&staged).map_err(|e| format!("remove stale update file: {e}"))?;
     }
-    fs::write(&staged, &binary).map_err(|e| {
-        format!(
-            "write update next to {}: {e}",
-            current_exe.display()
-        )
-    })?;
+    fs::write(&staged, &binary)
+        .map_err(|e| format!("write update next to {}: {e}", current_exe.display()))?;
 
     let was_running = service::ready() || service::mcp_ready();
     if was_running {
@@ -124,6 +164,7 @@ async fn latest_release(timeout: Duration) -> Result<Release, String> {
     Ok(Release { tag, version, json })
 }
 
+#[allow(clippy::disallowed_methods)] // Standalone updater has no xai-grok-extra-ca dependency; GitHub uses normal system TLS.
 fn github_client(timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent(format!("graft/{}", env!("CARGO_PKG_VERSION")))

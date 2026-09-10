@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use xai_grok_tools::bridge::ToolBridge;
 use xai_grok_tools::computer::local::{LocalFs, LocalTerminalBackend};
@@ -21,6 +21,10 @@ use xai_grok_tools::reminders::DEFAULT_REMINDER_TAG;
 
 pub const APP: &str = "graft";
 pub const DISPLAY: &str = "Graft";
+
+static LEGACY_MIGRATION: OnceLock<()> = OnceLock::new();
+#[cfg(windows)]
+static NPM_GLOBAL_PREFIX: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
@@ -56,34 +60,36 @@ pub fn mcp_socket() -> PathBuf {
 
 /// Copy existing configuration without overwriting Graft state.
 pub fn migrate_from_legacy() {
-    let dest = config_dir();
-    let mut sources = Vec::new();
-    #[cfg(windows)]
-    {
-        let base = dirs::config_dir().unwrap_or_else(|| home_dir().join("AppData/Roaming"));
-        sources.push(base.join("palmbridge"));
-        sources.push(base.join("hands"));
-    }
-    #[cfg(not(windows))]
-    {
-        let base = home_dir().join(".config");
-        sources.push(base.join("palmbridge"));
-        sources.push(base.join("hands"));
-        sources.push(base.join("grok-harness"));
-    }
-    for src in sources {
-        if !src.is_dir() {
-            continue;
+    LEGACY_MIGRATION.get_or_init(|| {
+        let dest = config_dir();
+        let mut sources = Vec::new();
+        #[cfg(windows)]
+        {
+            let base = dirs::config_dir().unwrap_or_else(|| home_dir().join("AppData/Roaming"));
+            sources.push(base.join("palmbridge"));
+            sources.push(base.join("hands"));
         }
-        let _ = std::fs::create_dir_all(&dest);
-        for name in ["workspace", "control-plane.key", "tunnel_id", "recent"] {
-            let from = src.join(name);
-            let to = dest.join(name);
-            if from.is_file() && !to.exists() {
-                let _ = std::fs::copy(&from, &to);
+        #[cfg(not(windows))]
+        {
+            let base = home_dir().join(".config");
+            sources.push(base.join("palmbridge"));
+            sources.push(base.join("hands"));
+            sources.push(base.join("grok-harness"));
+        }
+        for src in sources {
+            if !src.is_dir() {
+                continue;
+            }
+            let _ = std::fs::create_dir_all(&dest);
+            for name in ["workspace", "control-plane.key", "tunnel_id", "recent"] {
+                let from = src.join(name);
+                let to = dest.join(name);
+                if from.is_file() && !to.exists() {
+                    let _ = std::fs::copy(&from, &to);
+                }
             }
         }
-    }
+    });
 }
 
 pub fn read_pinned_workspace() -> Option<PathBuf> {
@@ -138,10 +144,7 @@ pub(crate) fn remember_workspace(cwd: &Path) {
     items.retain(|p| p != cwd);
     items.insert(0, cwd.to_path_buf());
     items.truncate(20);
-    let body: String = items
-        .iter()
-        .map(|p| format!("{}\n", p.display()))
-        .collect();
+    let body: String = items.iter().map(|p| format!("{}\n", p.display())).collect();
     let _ = crate::state::atomic_write(&recent_file(), body);
 }
 
@@ -191,7 +194,11 @@ pub fn resolve_project(raw: &str) -> Result<PathBuf, String> {
 /// Active workspace: env → pin file → `--cwd`/process cwd.
 pub fn resolve_workspace(fallback: &Path) -> PathBuf {
     migrate_from_legacy();
-    for var in ["PALMBRIDGE_WORKSPACE", "HANDS_WORKSPACE", "GROK_HARNESS_WORKSPACE"] {
+    for var in [
+        "PALMBRIDGE_WORKSPACE",
+        "HANDS_WORKSPACE",
+        "GROK_HARNESS_WORKSPACE",
+    ] {
         if let Ok(env_path) = std::env::var(var) {
             let p = PathBuf::from(env_path);
             if let Ok(c) = dunce::canonicalize(&p)
@@ -229,23 +236,28 @@ fn allowlist() -> ToolServerConfig {
     }
 }
 
-fn session_context(cwd: PathBuf) -> SessionContext {
+fn session_context(cwd: PathBuf, owner_session_id: &str) -> SessionContext {
     let host_dir = std::env::temp_dir().join(APP);
-    let _ = std::fs::create_dir_all(&host_dir);
+    let session_dir = host_dir
+        .join("sessions")
+        .join(session_folder_name(owner_session_id));
+    let _ = std::fs::create_dir_all(&session_dir);
     let notification_handle = ToolNotificationHandle::noop();
     let lsp = build_lsp_backend(&cwd, notification_handle.clone());
     SessionContext {
         backend: Arc::new(LocalTerminalBackend::new()),
         fs: Arc::new(LocalFs),
         cwd,
-        session_folder: host_dir.join("session"),
+        session_folder: session_dir,
         session_env: Arc::new(HashMap::new()),
         notification_handle,
-        owner_session_id: None,
+        owner_session_id: Some(owner_session_id.to_string()),
         subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
-        state_path: host_dir.join("state.json"),
+        // Runtime state is already held by this bridge. Persisting it under a
+        // process-global temp path leaks todos/tool state across MCP sessions.
+        state_path: PathBuf::new(),
         memory_backend: None,
         web_search_config: Default::default(),
         web_fetch_config: Default::default(),
@@ -260,6 +272,22 @@ fn session_context(cwd: PathBuf) -> SessionContext {
     }
 }
 
+fn session_folder_name(owner_session_id: &str) -> String {
+    let mut out = String::with_capacity(owner_session_id.len().min(96));
+    for c in owner_session_id.chars().take(96) {
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "session".into()
+    } else {
+        out
+    }
+}
+
 fn build_lsp_backend(
     cwd: &Path,
     notification_handle: ToolNotificationHandle,
@@ -269,12 +297,7 @@ fn build_lsp_backend(
     if servers.is_empty() {
         return None;
     }
-    let manager = LspManager::new(
-        servers,
-        cwd.to_path_buf(),
-        true,
-        notification_handle,
-    );
+    let manager = LspManager::new(servers, cwd.to_path_buf(), true, notification_handle);
     Some(Arc::new(LspBackendAdapter::new(Arc::new(
         tokio::sync::Mutex::new(manager),
     ))))
@@ -285,7 +308,8 @@ fn add_auto_detected_lsp_servers(cwd: &Path, servers: &mut BTreeMap<String, LspS
         servers.values().any(|cfg| cfg.extensions.contains_key(ext))
     };
 
-    if !claimed(".ts", servers)
+    if looks_like_typescript_project(cwd)
+        && !claimed(".ts", servers)
         && let Some((command, mut args)) = find_language_server(cwd, "typescript-language-server")
     {
         args.push("--stdio".into());
@@ -308,8 +332,8 @@ fn add_auto_detected_lsp_servers(cwd: &Path, servers: &mut BTreeMap<String, LspS
         );
     }
 
-
-    if !claimed(".py", servers)
+    if looks_like_python_project(cwd)
+        && !claimed(".py", servers)
         && let Some((command, mut args)) = find_language_server(cwd, "pyright-langserver")
     {
         args.push("--stdio".into());
@@ -326,12 +350,39 @@ fn add_auto_detected_lsp_servers(cwd: &Path, servers: &mut BTreeMap<String, LspS
     }
 }
 
+fn looks_like_typescript_project(cwd: &Path) -> bool {
+    [
+        "package.json",
+        "tsconfig.json",
+        "jsconfig.json",
+        "deno.json",
+        "deno.jsonc",
+    ]
+    .iter()
+    .any(|name| cwd.join(name).is_file())
+}
+
+fn looks_like_python_project(cwd: &Path) -> bool {
+    [
+        "pyproject.toml",
+        "requirements.txt",
+        "setup.py",
+        "setup.cfg",
+        "Pipfile",
+        "poetry.lock",
+    ]
+    .iter()
+    .any(|name| cwd.join(name).is_file())
+}
+
 fn find_language_server(cwd: &Path, name: &str) -> Option<(String, Vec<String>)> {
     // Rustup proxies can be shadowed by repo-specific shims on PATH. Resolve
     // the actual component first so Graft does not accidentally start a broken
     // rust-analyzer from another workspace.
     if name == "rust-analyzer"
-        && let Ok(output) = Command::new("rustup").args(["which", "rust-analyzer"]).output()
+        && let Ok(output) = Command::new("rustup")
+            .args(["which", "rust-analyzer"])
+            .output()
         && output.status.success()
     {
         let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
@@ -356,11 +407,14 @@ fn find_language_server(cwd: &Path, name: &str) -> Option<(String, Vec<String>)>
         }
     }
 
+    // PATH is effectively free compared with spawning npm. npm's global bin
+    // directory is normally already on PATH, so check it before the fallback.
+    if let Some(command) = find_language_server_on_path(name) {
+        return Some(command);
+    }
+
     #[cfg(windows)]
-    if let Ok(output) = Command::new("npm.cmd").args(["prefix", "-g"]).output()
-        && output.status.success()
-    {
-        let prefix = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if let Some(prefix) = npm_global_prefix() {
         for ext in ["cmd", "exe", "bat"] {
             let candidate = prefix.join(format!("{name}.{ext}"));
             if candidate.is_file() {
@@ -369,6 +423,10 @@ fn find_language_server(cwd: &Path, name: &str) -> Option<(String, Vec<String>)>
         }
     }
 
+    None
+}
+
+fn find_language_server_on_path(name: &str) -> Option<(String, Vec<String>)> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);
@@ -386,6 +444,23 @@ fn find_language_server(cwd: &Path, name: &str) -> Option<(String, Vec<String>)>
     None
 }
 
+#[cfg(windows)]
+fn npm_global_prefix() -> Option<PathBuf> {
+    NPM_GLOBAL_PREFIX
+        .get_or_init(|| {
+            let output = Command::new("npm.cmd")
+                .args(["prefix", "-g"])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            path.is_dir().then_some(path)
+        })
+        .clone()
+}
+
 fn command_for_path(path: PathBuf) -> (String, Vec<String>) {
     #[cfg(windows)]
     {
@@ -396,17 +471,22 @@ fn command_for_path(path: PathBuf) -> (String, Vec<String>) {
         if is_script {
             return (
                 "cmd.exe".into(),
-                vec!["/d".into(), "/s".into(), "/c".into(), path.display().to_string()],
+                vec![
+                    "/d".into(),
+                    "/s".into(),
+                    "/c".into(),
+                    path.display().to_string(),
+                ],
             );
         }
     }
     (path.display().to_string(), Vec::new())
 }
 
-pub async fn build_bridge(cwd: PathBuf) -> Result<ToolBridge, String> {
+pub async fn build_bridge(cwd: PathBuf, owner_session_id: &str) -> Result<ToolBridge, String> {
     let mut builder = ToolBridge::get_builder();
     builder.set_system_reminders_enabled(false);
-    ToolBridge::finalize_builder(builder, allowlist(), session_context(cwd))
+    ToolBridge::finalize_builder(builder, allowlist(), session_context(cwd, owner_session_id))
         .await
         .map_err(|e| e.to_string())
 }

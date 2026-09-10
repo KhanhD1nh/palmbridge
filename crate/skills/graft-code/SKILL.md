@@ -10,8 +10,18 @@ Do not ask the user in chat to confirm each edit. Call the tool. ChatGPT already
 ## Workspace
 
 1. Call `workspace_info` first if the folder might be wrong.
-2. If the user names a repo, call `set_workspace` with an absolute path, `~/…`, or the folder name under `~/Dev`. This changes the current Graft server session only; it does not mutate the persisted default workspace used by new server processes.
+2. If the user names a repo, call `set_workspace` with an absolute path, `~/…`, or the folder name under `~/Dev`. Stateful MCP sessions keep this switch locally. For stateless/reconnecting clients, use `persist=true` when subsequent calls must stay on that repo.
 3. Do not invent paths. If `set_workspace` fails, use `recent` from `workspace_info` or ask once.
+
+Do not call `workspace_info` mechanically before every tool call. Re-check only when the workspace is unknown, may have changed, or a previous result indicates drift.
+
+## Read
+
+- Known single file: `read_file`.
+- Several known files/ranges: `batch_read` to avoid serial round trips.
+- Find symbols/definitions/references: prefer `lsp` over broad text search when an LSP is available.
+- Find filenames: `glob` defaults to fast mode. Use `mode=recent` only when newest-first ordering is actually needed.
+- Inspect repository changes: prefer `git_status` and `git_diff` over shell commands.
 
 ## Edit
 

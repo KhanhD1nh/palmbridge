@@ -15,7 +15,8 @@ use tokio_tungstenite::{WebSocketStream, connect_async, tungstenite::Message};
 const DEFAULT_PORT: u16 = 9222;
 const DEFAULT_WIDTH: u32 = 1440;
 const DEFAULT_HEIGHT: u32 = 900;
-const DEFAULT_WAIT_MS: u64 = 600;
+const DEFAULT_SCREENSHOT_WAIT_MS: u64 = 50;
+const PAGE_READY_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[allow(clippy::disallowed_methods)] // Loopback-only CDP client; no external TLS.
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
@@ -25,10 +26,10 @@ fn http_client() -> &'static reqwest::Client {
 }
 
 pub fn tool_definition() -> Value {
-    json!({
-        "name": "browser",
-        "description": "Inspect and debug a real Chromium page. Operations: start (persistent debug browser), inspect (DOM + computed styles, optionally sampled over time), eval (run JavaScript), screenshot, stop. If no debug browser is running, inspect/eval/screenshot launch an ephemeral headless browser. For authenticated localhost apps, run operation=start once and sign in to the persistent Graft browser profile.",
-        "inputSchema": {
+    crate::plugin::tool_descriptor(
+        "browser",
+        "Inspect or debug Chromium. Reuses the current persistent page when url is omitted; screenshots return inline image content.",
+        json!({
             "type": "object",
             "properties": {
                 "operation": {
@@ -46,7 +47,7 @@ pub fn tool_definition() -> Value {
                     "maxItems": 20,
                     "description": "For inspect, sample computed styles at these absolute delays after script, e.g. [0,50,100,150,250]."
                 },
-                "wait_ms": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 600 },
+                "wait_ms": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "Optional extra settle delay after script execution. Defaults to 0ms, or 50ms for screenshots." },
                 "width": { "type": "integer", "minimum": 240, "maximum": 7680, "default": 1440 },
                 "height": { "type": "integer", "minimum": 240, "maximum": 4320, "default": 900 },
                 "port": { "type": "integer", "minimum": 1024, "maximum": 65535, "description": "Optional Chromium debug port. start chooses a free loopback port when omitted; later operations reuse the recorded port." },
@@ -56,23 +57,41 @@ pub fn tool_definition() -> Value {
             },
             "required": ["operation"],
             "additionalProperties": false
-        },
-        "annotations": {
-            "readOnlyHint": false,
-            "destructiveHint": false,
-            "openWorldHint": true
-        }
-    })
+        }),
+    )
 }
 
-pub async fn run(arguments: &Value, cwd: &Path) -> Result<String, String> {
+pub struct BrowserImage {
+    pub data: String,
+    pub mime_type: &'static str,
+}
+
+pub struct BrowserResult {
+    pub text: String,
+    pub structured: Value,
+    pub image: Option<BrowserImage>,
+}
+
+impl BrowserResult {
+    fn text(operation: &str, text: String) -> Self {
+        Self {
+            structured: json!({ "operation": operation, "message": text }),
+            text,
+            image: None,
+        }
+    }
+}
+
+pub async fn run(arguments: &Value, cwd: &Path) -> Result<BrowserResult, String> {
     let operation = arguments
         .get("operation")
         .and_then(Value::as_str)
         .ok_or("browser requires operation")?;
     match operation {
-        "start" => start_persistent(arguments).await,
-        "stop" => stop_persistent(),
+        "start" => start_persistent(arguments)
+            .await
+            .map(|text| BrowserResult::text("start", text)),
+        "stop" => stop_persistent().map(|text| BrowserResult::text("stop", text)),
         "inspect" | "eval" | "screenshot" => run_page_operation(operation, arguments, cwd).await,
         other => Err(format!("unsupported browser operation: {other}")),
     }
@@ -84,7 +103,9 @@ async fn start_persistent(arguments: &Value) -> Result<String, String> {
         None => free_port()?,
     };
     if cdp_ready(port).await {
-        return Ok(format!("Graft browser is already listening on http://127.0.0.1:{port}."));
+        return Ok(format!(
+            "Graft browser is already listening on http://127.0.0.1:{port}."
+        ));
     }
     let browser = find_browser().ok_or_else(browser_not_found_message)?;
     let profile = arguments
@@ -95,8 +116,14 @@ async fn start_persistent(arguments: &Value) -> Result<String, String> {
     fs::create_dir_all(&profile).map_err(|e| format!("create browser profile: {e}"))?;
     let width = arg_u32(arguments, "width", DEFAULT_WIDTH);
     let height = arg_u32(arguments, "height", DEFAULT_HEIGHT);
-    let headless = arguments.get("headless").and_then(Value::as_bool).unwrap_or(false);
-    let url = arguments.get("url").and_then(Value::as_str).unwrap_or("about:blank");
+    let headless = arguments
+        .get("headless")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let url = arguments
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or("about:blank");
 
     let mut child = spawn_browser(&browser, port, &profile, width, height, headless, url)?;
     let pid = child.id();
@@ -142,16 +169,36 @@ fn stop_persistent() -> Result<String, String> {
     Ok("No Graft browser pid is recorded.".into())
 }
 
-async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> Result<String, String> {
+async fn run_page_operation(
+    operation: &str,
+    arguments: &Value,
+    cwd: &Path,
+) -> Result<BrowserResult, String> {
     let requested_port = arg_u16(arguments, "port", recorded_port().unwrap_or(DEFAULT_PORT));
     let width = arg_u32(arguments, "width", DEFAULT_WIDTH);
     let height = arg_u32(arguments, "height", DEFAULT_HEIGHT);
-    let wait_ms = arg_u64(arguments, "wait_ms", DEFAULT_WAIT_MS).min(10_000);
-    let url = arguments.get("url").and_then(Value::as_str).unwrap_or("about:blank");
+    let wait_ms = arguments
+        .get("wait_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            if operation == "screenshot" {
+                DEFAULT_SCREENSHOT_WAIT_MS
+            } else {
+                0
+            }
+        })
+        .min(10_000);
+    let requested_url = arguments.get("url").and_then(Value::as_str);
+    let launch_url = requested_url.unwrap_or("about:blank");
 
     let mut ephemeral = None;
-    let (port, create_target) = if cdp_ready(requested_port).await {
-        (requested_port, true)
+    let (port, target, wait_for_ready) = if cdp_ready(requested_port).await {
+        let target = if let Some(url) = requested_url {
+            create_page_target(requested_port, url).await?
+        } else {
+            wait_for_page_target(requested_port, Duration::from_secs(2)).await?
+        };
+        (requested_port, target, requested_url.is_some())
     } else {
         let port = free_port()?;
         let browser = find_browser().ok_or_else(browser_not_found_message)?;
@@ -161,17 +208,18 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
             now_millis()
         ));
         fs::create_dir_all(&profile).map_err(|e| format!("create temp browser profile: {e}"))?;
-        let child = spawn_browser(&browser, port, &profile, width, height, true, url)?;
+        let child = spawn_browser(&browser, port, &profile, width, height, true, launch_url)?;
         ephemeral = Some(EphemeralBrowser { child, profile });
         wait_for_cdp(port, Duration::from_secs(8)).await?;
-        (port, false)
+        let target = wait_for_page_target(port, Duration::from_secs(5)).await?;
+        (port, target, true)
     };
 
-    let target = if create_target {
-        create_page_target(port, url).await.or_else(|_| async_error_placeholder())?
-    } else {
-        wait_for_page_target(port, Duration::from_secs(5)).await?
-    };
+    let actual_url = target
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or(launch_url)
+        .to_string();
     let ws_url = target
         .get("webSocketDebuggerUrl")
         .and_then(Value::as_str)
@@ -183,10 +231,15 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
 
     cdp_call(&mut ws, &mut next_id, "Runtime.enable", json!({})).await?;
     cdp_call(&mut ws, &mut next_id, "Page.enable", json!({})).await?;
-    sleep(Duration::from_millis(wait_ms)).await;
+    if wait_for_ready {
+        wait_for_document_ready(&mut ws, &mut next_id, PAGE_READY_TIMEOUT).await?;
+    }
 
     if let Some(script) = arguments.get("script").and_then(Value::as_str) {
         evaluate(&mut ws, &mut next_id, script).await?;
+    }
+    if wait_ms > 0 {
+        sleep(Duration::from_millis(wait_ms)).await;
     }
 
     let output = match operation {
@@ -196,7 +249,16 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
                 .and_then(Value::as_str)
                 .ok_or("browser eval requires expression")?;
             let value = evaluate(&mut ws, &mut next_id, expression).await?;
-            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+            BrowserResult {
+                text: serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
+                structured: json!({
+                    "operation": "eval",
+                    "url": actual_url,
+                    "debugPort": port,
+                    "value": value
+                }),
+                image: None,
+            }
         }
         "inspect" => {
             let selector = arguments.get("selector").and_then(Value::as_str);
@@ -205,7 +267,12 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
             let mut delays = arguments
                 .get("sample_delays_ms")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(Value::as_u64).take(20).collect::<Vec<_>>())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_u64)
+                        .take(20)
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_else(|| vec![0]);
             if delays.is_empty() {
                 delays.push(0);
@@ -220,14 +287,21 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
                     sleep(target_delay - started.elapsed()).await;
                 }
                 let value = evaluate(&mut ws, &mut next_id, &expression).await?;
-                samples.push(json!({ "elapsedMs": started.elapsed().as_millis(), "inspection": value }));
+                samples.push(
+                    json!({ "elapsedMs": started.elapsed().as_millis(), "inspection": value }),
+                );
             }
-            serde_json::to_string_pretty(&json!({
-                "url": url,
+            let structured = json!({
+                "operation": "inspect",
+                "url": actual_url,
                 "debugPort": port,
                 "samples": samples
-            }))
-            .map_err(|e| e.to_string())?
+            });
+            BrowserResult {
+                text: serde_json::to_string_pretty(&structured).map_err(|e| e.to_string())?,
+                structured,
+                image: None,
+            }
         }
         "screenshot" => {
             let result = cdp_call(
@@ -237,7 +311,10 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
                 json!({ "format": "png", "captureBeyondViewport": false }),
             )
             .await?;
-            let data = result.get("data").and_then(Value::as_str).ok_or("screenshot returned no data")?;
+            let data = result
+                .get("data")
+                .and_then(Value::as_str)
+                .ok_or("screenshot returned no data")?;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data)
                 .map_err(|e| format!("decode screenshot: {e}"))?;
@@ -246,7 +323,19 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
                 None => std::env::temp_dir().join(format!("graft-browser-{}.png", now_millis())),
             };
             fs::write(&output_path, bytes).map_err(|e| format!("write screenshot: {e}"))?;
-            format!("Screenshot: {}", output_path.display())
+            BrowserResult {
+                text: format!("Screenshot: {}", output_path.display()),
+                structured: json!({
+                    "operation": "screenshot",
+                    "url": actual_url,
+                    "debugPort": port,
+                    "path": output_path.display().to_string()
+                }),
+                image: Some(BrowserImage {
+                    data: data.to_string(),
+                    mime_type: "image/png",
+                }),
+            }
         }
         _ => unreachable!(),
     };
@@ -259,9 +348,18 @@ async fn run_page_operation(operation: &str, arguments: &Value, cwd: &Path) -> R
 fn workspace_output_path(cwd: &Path, output: &str) -> Result<PathBuf, String> {
     let relative = Path::new(output);
     if relative.as_os_str().is_empty() || relative.is_absolute() {
-        return Err("browser screenshot output_path must be a non-empty path within the workspace".into());
+        return Err(
+            "browser screenshot output_path must be a non-empty path within the workspace".into(),
+        );
     }
-    if relative.components().any(|component| matches!(component, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))) {
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
         return Err("browser screenshot output_path must not escape the workspace".into());
     }
     let workspace = dunce::canonicalize(cwd)
@@ -270,7 +368,9 @@ fn workspace_output_path(cwd: &Path, output: &str) -> Result<PathBuf, String> {
     let resolved = if output_path.exists() {
         dunce::canonicalize(&output_path)
     } else {
-        let parent = output_path.parent().ok_or("browser screenshot output_path has no parent")?;
+        let parent = output_path
+            .parent()
+            .ok_or("browser screenshot output_path has no parent")?;
         dunce::canonicalize(parent)
     }
     .map_err(|e| format!("canonicalize screenshot output path: {e}"))?;
@@ -278,11 +378,6 @@ fn workspace_output_path(cwd: &Path, output: &str) -> Result<PathBuf, String> {
         return Err("browser screenshot output_path escapes the workspace".into());
     }
     Ok(output_path)
-}
-
-// Helper used only to keep the fallback expression in run_page_operation readable.
-fn async_error_placeholder() -> Result<Value, String> {
-    Err("failed to create a new Chromium page target".into())
 }
 
 async fn evaluate<S>(
@@ -315,6 +410,30 @@ where
         .unwrap_or(Value::Null))
 }
 
+async fn wait_for_document_ready<S>(
+    ws: &mut WebSocketStream<S>,
+    next_id: &mut u64,
+    timeout: Duration,
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let start = Instant::now();
+    loop {
+        let state = evaluate(ws, next_id, "document.readyState").await?;
+        if state
+            .as_str()
+            .is_some_and(|state| matches!(state, "interactive" | "complete"))
+        {
+            return Ok(());
+        }
+        if start.elapsed() >= timeout {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
 async fn cdp_call<S>(
     ws: &mut WebSocketStream<S>,
     next_id: &mut u64,
@@ -333,8 +452,11 @@ where
 
     while let Some(message) = ws.next().await {
         let message = message.map_err(|e| format!("read CDP {method}: {e}"))?;
-        let Message::Text(text) = message else { continue };
-        let value: Value = serde_json::from_str(text.as_ref()).map_err(|e| format!("parse CDP response: {e}"))?;
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let value: Value =
+            serde_json::from_str(text.as_ref()).map_err(|e| format!("parse CDP response: {e}"))?;
         if value.get("id").and_then(Value::as_u64) != Some(id) {
             continue;
         }
@@ -350,7 +472,9 @@ fn inspect_expression(selector: Option<&str>, xpath: Option<&str>) -> String {
     let selector = serde_json::to_string(selector.unwrap_or("body")).unwrap();
     let xpath = xpath.map(|s| serde_json::to_string(s).unwrap());
     let lookup = if let Some(xpath) = xpath {
-        format!("document.evaluate({xpath}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue")
+        format!(
+            "document.evaluate({xpath}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue"
+        )
     } else {
         format!("document.querySelector({selector})")
     };
@@ -412,7 +536,9 @@ async fn wait_for_cdp(port: u16, timeout: Duration) -> Result<(), String> {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    Err(format!("Chromium debug port {port} did not become ready within {timeout:?}"))
+    Err(format!(
+        "Chromium debug port {port} did not become ready within {timeout:?}"
+    ))
 }
 
 async fn wait_for_page_target(port: u16, timeout: Duration) -> Result<Value, String> {
@@ -426,10 +552,10 @@ async fn wait_for_page_target(port: u16, timeout: Duration) -> Result<Value, Str
             .json()
             .await
             .map_err(|e| format!("parse Chromium targets: {e}"))?;
-        if let Some(target) = list
-            .as_array()
-            .and_then(|a| a.iter().find(|t| t.get("type").and_then(Value::as_str) == Some("page")))
-        {
+        if let Some(target) = list.as_array().and_then(|a| {
+            a.iter()
+                .find(|t| t.get("type").and_then(Value::as_str) == Some("page"))
+        }) {
             return Ok(target.clone());
         }
         sleep(Duration::from_millis(100)).await;
@@ -447,9 +573,15 @@ async fn create_page_target(port: u16, url: &str) -> Result<Value, String> {
         .await
         .map_err(|e| format!("create Chromium target: {e}"))?;
     if !response.status().is_success() {
-        return Err(format!("create Chromium target returned {}", response.status()));
+        return Err(format!(
+            "create Chromium target returned {}",
+            response.status()
+        ));
     }
-    response.json().await.map_err(|e| format!("parse new Chromium target: {e}"))
+    response
+        .json()
+        .await
+        .map_err(|e| format!("parse new Chromium target: {e}"))
 }
 
 #[allow(clippy::disallowed_methods)] // Browser lifecycle is owned by Graft, not an MCP task scope.
@@ -521,7 +653,14 @@ fn find_browser() -> Option<PathBuf> {
         }
     }
 
-    for name in ["chrome", "chromium", "chromium-browser", "brave", "brave-browser", "msedge"] {
+    for name in [
+        "chrome",
+        "chromium",
+        "chromium-browser",
+        "brave",
+        "brave-browser",
+        "msedge",
+    ] {
         if let Some(path) = find_on_path(name) {
             return Some(path);
         }
@@ -550,12 +689,17 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn browser_not_found_message() -> String {
-    "No Chromium browser found. Install Chrome/Brave/Edge/Chromium or set GRAFT_BROWSER_PATH.".into()
+    "No Chromium browser found. Install Chrome/Brave/Edge/Chromium or set GRAFT_BROWSER_PATH."
+        .into()
 }
 
 fn free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("allocate browser port: {e}"))?;
-    listener.local_addr().map(|a| a.port()).map_err(|e| e.to_string())
+    let listener =
+        TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("allocate browser port: {e}"))?;
+    listener
+        .local_addr()
+        .map(|a| a.port())
+        .map_err(|e| e.to_string())
 }
 
 fn browser_pid_path() -> PathBuf {
@@ -573,11 +717,18 @@ fn write_browser_state(pid: u32, port: u16) -> Result<(), String> {
 }
 
 fn recorded_port() -> Option<u16> {
-    fs::read_to_string(browser_port_path()).ok()?.trim().parse().ok()
+    fs::read_to_string(browser_port_path())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn arg_u64(arguments: &Value, key: &str, default: u64) -> u64 {
-    arguments.get(key).and_then(Value::as_u64).unwrap_or(default)
+    arguments
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or(default)
 }
 
 fn arg_u32(arguments: &Value, key: &str, default: u32) -> u32 {
@@ -589,7 +740,10 @@ fn arg_u16(arguments: &Value, key: &str, default: u16) -> u16 {
 }
 
 fn now_millis() -> u128 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 struct EphemeralBrowser {

@@ -264,7 +264,8 @@ graft use
 |---|---|
 | `graft setup` | Configure credentials, pin workspace, enable tunnel |
 | `graft use` | Pin current directory |
-| `graft start` / `graft stop` | Start or stop tunnel |
+| `graft start` / `graft stop` | Start or stop tunnel; `start` also checks GitHub Releases and logs when a newer Graft version is available |
+| `graft update` | Download the latest release for this platform, verify it against `SHA256SUMS`, replace the current binary, and restart the tunnel if it was running |
 | `graft enable` / `graft disable` | Enable or disable service |
 | `graft status --json` | Check machine-readable health |
 | `graft config --open` | Open local UI at `http://127.0.0.1:8787/` |

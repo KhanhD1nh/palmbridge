@@ -10,6 +10,7 @@ mod secrets;
 mod state;
 mod service;
 mod setup;
+mod update;
 mod ui;
 mod watch;
 
@@ -28,6 +29,7 @@ Graft — unofficial ChatGPT plugin (local tools, no model)
   cd /repo && graft use            pin this folder
   graft status [--json]
   graft enable | disable | start | stop
+  graft update                     update to the latest GitHub release
   graft                            MCP stdio (ChatGPT tunnel)
 
 Debug:
@@ -46,6 +48,7 @@ enum Cmd {
     Disable,
     Start,
     Stop,
+    Update,
     Supervise,
     Watch,
     McpStdio,
@@ -111,6 +114,7 @@ fn parse_args() -> Result<(PathBuf, Cmd), String> {
             [op] if op == "disable" => Cmd::Disable,
             [op] if op == "start" => Cmd::Start,
             [op] if op == "stop" => Cmd::Stop,
+            [op] if op == "update" => Cmd::Update,
             [op] if op == "list" => Cmd::List,
             [op, tool, json] if op == "call" => Cmd::Call {
                 tool: tool.clone(),
@@ -201,8 +205,12 @@ async fn run(fallback: PathBuf, cmd: Cmd) -> Result<(), String> {
         }
         Cmd::Enable => service::enable(),
         Cmd::Disable => service::disable(),
-        Cmd::Start => service::start(),
+        Cmd::Start => {
+            update::check_on_start().await;
+            service::start()
+        }
         Cmd::Stop => service::stop(),
+        Cmd::Update => update::run().await,
         Cmd::Supervise => {
             service::supervise();
             Ok(())

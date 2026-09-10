@@ -1,6 +1,6 @@
 [package]
 name = "graft"
-version = "0.1.6"
+version = "0.1.7"
 edition.workspace = true
 license = "Apache-2.0"
 description = "Unofficial ChatGPT plugin: local coding tools over MCP. No model."
@@ -18,7 +18,9 @@ futures-util = { workspace = true }
 globset = { workspace = true }
 ignore = { workspace = true }
 reqwest = { workspace = true }
+semver = { workspace = true }
 serde_json = { workspace = true }
+self-replace = "1.5"
 sha2 = { workspace = true }
 tokio = { workspace = true, features = [
     "macros",

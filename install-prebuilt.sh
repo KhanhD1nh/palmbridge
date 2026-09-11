@@ -26,30 +26,29 @@ esac
 ASSET="graft-${OS_TAG}-${ARCH_TAG}"
 
 # --- Download graft ---
+# Avoid the unauthenticated GitHub Releases API here. Shared CI/public IPs can
+# hit API rate limits and fail with HTTP 403 even though the release assets are
+# publicly downloadable.
 if [ "$VERSION" = "latest" ]; then
-  API_URL="https://api.github.com/repos/$REPO/releases/latest"
+  RELEASE_BASE="https://github.com/$REPO/releases/latest/download"
 else
-  API_URL="https://api.github.com/repos/$REPO/releases/tags/$VERSION"
+  RELEASE_BASE="https://github.com/$REPO/releases/download/$VERSION"
 fi
-
-echo "Fetching release info..."
-DOWNLOAD_URL=$(curl -fsSL "$API_URL" | grep '"browser_download_url"' | grep "$ASSET" | head -1 | cut -d'"' -f4)
-CHECKSUM_URL=$(curl -fsSL "$API_URL" | grep '"browser_download_url"' | grep 'SHA256SUMS' | head -1 | cut -d'"' -f4)
-if [ -z "$DOWNLOAD_URL" ]; then
-  echo "No asset found for $ASSET in release $VERSION"
-  exit 1
-fi
-if [ -z "$CHECKSUM_URL" ]; then
-  echo "Release $VERSION has no SHA256SUMS; refusing unverified install"
-  exit 1
-fi
+DOWNLOAD_URL="$RELEASE_BASE/$ASSET"
+CHECKSUM_URL="$RELEASE_BASE/SHA256SUMS"
 
 echo "Downloading $ASSET..."
 PB_TMP=$(mktemp)
 SUM_TMP=$(mktemp)
 trap 'rm -f "$PB_TMP" "$SUM_TMP"' EXIT
-curl -fsSL "$DOWNLOAD_URL" -o "$PB_TMP"
-curl -fsSL "$CHECKSUM_URL" -o "$SUM_TMP"
+if ! curl -fL --retry 3 --retry-delay 1 --connect-timeout 15 "$DOWNLOAD_URL" -o "$PB_TMP"; then
+  echo "No downloadable asset found for $ASSET in release $VERSION"
+  exit 1
+fi
+if ! curl -fL --retry 3 --retry-delay 1 --connect-timeout 15 "$CHECKSUM_URL" -o "$SUM_TMP"; then
+  echo "Release $VERSION has no SHA256SUMS; refusing unverified install"
+  exit 1
+fi
 EXPECTED=$(grep "  $ASSET$" "$SUM_TMP" | head -1 | cut -d' ' -f1)
 if [ -z "$EXPECTED" ]; then
   echo "No checksum found for $ASSET"

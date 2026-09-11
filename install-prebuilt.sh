@@ -63,7 +63,11 @@ if [ "$ACTUAL" != "$EXPECTED" ]; then
   echo "SHA-256 mismatch for $ASSET"
   exit 1
 fi
+WAS_RUNNING=0
 if command -v graft >/dev/null 2>&1; then
+  if graft status --json 2>/dev/null | grep -q '"tunnel_ready"[[:space:]]*:[[:space:]]*true'; then
+    WAS_RUNNING=1
+  fi
   graft stop || true
 fi
 if command -v palmbridge >/dev/null 2>&1; then
@@ -98,11 +102,14 @@ fi
 # downloaded release ZIPs are not notarized. Linux uses the signed-release
 # checksum manifest and installs the verified binary into the Graft prefix.
 if [ "$OS" = "darwin" ]; then
-  if ! command -v tunnel-client >/dev/null 2>&1; then
-    if ! command -v brew >/dev/null 2>&1; then
-      echo "tunnel-client on macOS requires Homebrew: brew install openai/tools/tunnel-client"
-      exit 1
-    fi
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "tunnel-client on macOS requires Homebrew: brew install openai/tools/tunnel-client"
+    exit 1
+  fi
+  if command -v tunnel-client >/dev/null 2>&1; then
+    echo "Updating tunnel-client..."
+    brew upgrade openai/tools/tunnel-client || true
+  else
     brew install openai/tools/tunnel-client
   fi
 else
@@ -154,6 +161,11 @@ if ! echo "$PATH" | grep -q "$BIN"; then
     echo "Add this to your shell profile: export PATH=\"\$PATH:$BIN\""
   fi
   export PATH="$PATH:$BIN"
+fi
+
+if [ "$WAS_RUNNING" = "1" ]; then
+  echo "Restarting Graft services..."
+  "$BIN/graft" start
 fi
 
 echo ""

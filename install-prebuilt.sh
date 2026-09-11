@@ -11,6 +11,11 @@ BIN="$PREFIX/bin"
 mkdir -p "$BIN"
 
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$OS" in
+  darwin) OS_TAG="macos" ;;
+  linux) OS_TAG="linux" ;;
+  *) echo "Unsupported OS: $OS"; exit 1 ;;
+esac
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64)  ARCH_TAG="x86_64" ;;
@@ -18,11 +23,7 @@ case "$ARCH" in
   *) echo "Unsupported arch: $ARCH"; exit 1 ;;
 esac
 
-ASSET="graft-${OS}-${ARCH_TAG}"
-if [ "$OS" = "darwin" ] && [ "$ARCH_TAG" = "x86_64" ]; then
-  echo "No x86_64 macOS build (only aarch64). Build from source."
-  exit 1
-fi
+ASSET="graft-${OS_TAG}-${ARCH_TAG}"
 
 # --- Download graft ---
 if [ "$VERSION" = "latest" ]; then
@@ -71,7 +72,27 @@ if command -v palmbridge >/dev/null 2>&1; then
 fi
 mv "$PB_TMP" "$BIN/graft"
 chmod +x "$BIN/graft"
-"$BIN/graft" --version
+if [ "$OS" = "darwin" ]; then
+  # curl normally does not add quarantine, but some managed macOS setups do.
+  # Remove only the quarantine attribute so Gatekeeper does not reject the
+  # verified release binary on first launch.
+  xattr -d com.apple.quarantine "$BIN/graft" >/dev/null 2>&1 || true
+
+  # Fail with a useful diagnostic instead of looking like an unexplained
+  # crash when macOS cannot load the downloaded executable.
+  if ! "$BIN/graft" --version; then
+    echo "Graft could not start on this Mac."
+    echo "macOS: $(sw_vers -productVersion 2>/dev/null || echo unknown)"
+    echo "arch:  $(uname -m)"
+    if command -v codesign >/dev/null 2>&1; then
+      codesign --verify --verbose=2 "$BIN/graft" 2>&1 || true
+    fi
+    echo "Try: xattr -dr com.apple.quarantine '$BIN/graft'"
+    exit 1
+  fi
+else
+  "$BIN/graft" --version
+fi
 
 # --- Install/download tunnel-client ---
 # OpenAI documents Homebrew as the supported macOS install path; directly
@@ -139,5 +160,3 @@ fi
 echo ""
 echo "Installed successfully. Run:"
 echo "  graft setup"
-
-</content>

@@ -4,8 +4,23 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
+  install-macos:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - name: Install from public main script
+        shell: bash
+        run: curl -fsSL https://raw.githubusercontent.com/KhanhD1nh/palmbridge/main/install-prebuilt.sh | bash
+
+      - name: Verify installed CLI
+        shell: bash
+        run: |
+          "$HOME/.local/bin/graft" --version
+          command -v tunnel-client >/dev/null 2>&1
+
   build:
     strategy:
       fail-fast: false

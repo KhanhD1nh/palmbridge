@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -45,6 +45,7 @@ fn negotiate_protocol(requested: Option<&str>) -> &'static str {
 struct SessionState {
     id: String,
     workspace: RwLock<PathBuf>,
+    follow_persisted_workspace: AtomicBool,
     cached: Mutex<Option<(PathBuf, ToolBridge)>>,
 }
 
@@ -71,6 +72,7 @@ impl McpHost {
             default: Arc::new(SessionState {
                 id: format!("default-{}", std::process::id()),
                 workspace: RwLock::new(workspace),
+                follow_persisted_workspace: AtomicBool::new(true),
                 cached: Mutex::new(None),
             }),
             terminal_backend: Arc::new(LocalTerminalBackend::new()),
@@ -115,6 +117,14 @@ impl McpHost {
     }
 
     fn workspace(&self, session: &SessionState) -> PathBuf {
+        let persisted = host::resolve_workspace(&self.fallback_cwd);
+        self.workspace_with_default(session, persisted)
+    }
+
+    fn workspace_with_default(&self, session: &SessionState, persisted: PathBuf) -> PathBuf {
+        if session.follow_persisted_workspace.load(Ordering::Acquire) {
+            return persisted;
+        }
         session
             .workspace
             .read()
@@ -209,8 +219,14 @@ impl McpHost {
         }
         if persist {
             host::pin_workspace(&cwd)?;
+            session
+                .follow_persisted_workspace
+                .store(true, Ordering::Release);
         } else {
             host::remember_workspace(&cwd);
+            session
+                .follow_persisted_workspace
+                .store(false, Ordering::Release);
         }
         let mut cache = session.cached.lock().await;
         *cache = None;
@@ -220,9 +236,8 @@ impl McpHost {
     fn fresh_session_state(&self, id: String) -> Arc<SessionState> {
         Arc::new(SessionState {
             id,
-            // The persisted pin is a default for *new* sessions. Re-resolve it
-            // here so `graft use` takes effect without disrupting sessions
             workspace: RwLock::new(host::resolve_workspace(&self.fallback_cwd)),
+            follow_persisted_workspace: AtomicBool::new(true),
             cached: Mutex::new(None),
         })
     }
@@ -1218,10 +1233,47 @@ async fn write_http_with_headers<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
 
     use serde_json::{Value, json};
 
     use super::{McpHost, PROTOCOL_VERSION, negotiate_protocol};
+
+    #[tokio::test]
+    async fn attached_session_follows_changed_persisted_workspace() {
+        let host = McpHost::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let session = host.fresh_session_state("workspace-follow-regression".into());
+        let old = PathBuf::from("old-workspace");
+        let new = PathBuf::from("new-workspace");
+
+        match session.workspace.write() {
+            Ok(mut workspace) => *workspace = old,
+            Err(poisoned) => *poisoned.into_inner() = PathBuf::from("old-workspace"),
+        }
+
+        assert!(session.follow_persisted_workspace.load(Ordering::Acquire));
+        assert_eq!(host.workspace_with_default(&session, new.clone()), new);
+    }
+
+    #[tokio::test]
+    async fn session_override_does_not_follow_unrelated_persisted_workspace() {
+        let host = McpHost::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let session = host.fresh_session_state("workspace-override-regression".into());
+        let local = PathBuf::from("session-local-workspace");
+
+        match session.workspace.write() {
+            Ok(mut workspace) => *workspace = local.clone(),
+            Err(poisoned) => *poisoned.into_inner() = local.clone(),
+        }
+        session
+            .follow_persisted_workspace
+            .store(false, Ordering::Release);
+
+        assert_eq!(
+            host.workspace_with_default(&session, PathBuf::from("new-global-workspace")),
+            local
+        );
+    }
 
     #[test]
     fn protocol_negotiation_never_echoes_an_unsupported_version() {
